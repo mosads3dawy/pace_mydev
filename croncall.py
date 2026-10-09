@@ -18,9 +18,3 @@ def croncall(*args):
 if __name__=='__main__':
     leaderip = sys.argv[1]
     croncall(leaderip) 
- #cmdline='cat /pacedata/perfmon'
- #perfmon=str(subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout)
- #if '1' in perfmon:
- # queuethis('zpooltoimport.py','start','system')
- #if '1' in perfmon:
- # queuethis('zpooltoimport.py','stop','system')

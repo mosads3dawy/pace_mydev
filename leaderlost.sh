@@ -26,13 +26,12 @@ then
 fi
 echo /TopStor/docker_primary.sh $leader $myhostip $leaderip $clusterip
 /TopStor/docker_primary.sh $leader $myhostip $leaderip $clusterip
-/TopStor/promserver.sh $leaderip 
+# The monitoring stack (prometheus + grafana are recreated, ~60 s) is started in the background, and only once the API
+# answers (60 s at most): run in line it kept the heartbeat from finishing the take over (hostdown sync, clean up of the
+# lost leader) for a minute, and its disk load made the API start take ~27 s instead of ~1 s.
+( n=0; until curl -s -m 2 -o /dev/null http://$leaderip:5001/ || [ $n -ge 30 ]; do sleep 2; n=$((n+1)); done; /TopStor/promserver.sh $leaderip ) >/dev/null 2>&1 </dev/null &
 echo docker exec etcdclient /TopStor/logmsg.py Partst05 info system $myhost 
 docker exec etcdclient /TopStor/logmsg.py Partst05 info system $myhost 
-echo $perfmon | grep 1
-if [ $? -eq 0 ]; then
- docker exec etcdclient /TopStor/logqueue.py AddingMePrimary start system 
-fi
 stamp=`date +%s%N`
 docker exec etcdclient /TopStor/logmsg.py Partst02 warning system $losthost
 /pace/etcddel.py $leaderip sync/leader/Add --prefix

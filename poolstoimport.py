@@ -8,7 +8,6 @@ from etcddel import etcddel as dels
 from os.path import getmtime
 def getpoolstoimport():
  global leader, leaderip, myhost, myip
- perfmon = '0'
  sitechange=0
  replacingroup = ''
  replaceflag = 0

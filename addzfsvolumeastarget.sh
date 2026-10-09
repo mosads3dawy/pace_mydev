@@ -13,6 +13,9 @@ target=`echo $@ | awk '{print $5}'`
 chapuser=`echo $@ | awk '{print $6}'`
 chappas=`echo $@ | awk '{print $7}'`
 lunid=`echo $@ | awk '{print $8}'`
+# container flavour: no udev, the zvol node and its /dev/zvol link are made here (see czvoldev.sh)
+[ -f /TopStor/flavor.sh ] && . /TopStor/flavor.sh
+is_container 2>/dev/null && /pace/czvoldev.sh
 disk=`ls -l /dev/zvol/${pool}/$vol | awk -F'/' '{print $NF}'`
 echo disk $disk
 #chapuser='iqn.1991-05.com.microsoft:desktop-jckvhk3'
@@ -51,7 +54,8 @@ cluns=`targetcli iscsi/iqn${iqn}/${tpg}/acls/$target ls`
 echo $cluns | grep $diskids 
 if [ $? -ne 0 ];
 then
- nextlun=`echo $cluns | wc -l`
+ # the number of LUNs already mapped for this initiator (the old 'echo $cluns | wc -l' always counted one line = 1)
+ nextlun=`targetcli iscsi/iqn${iqn}/${tpg}/acls/$target ls | grep -c mapped_lun`
  echo targetcli iscsi/iqn${iqn}/${tpg}/acls/$target = $nextlun
  targetcli iscsi/iqn${iqn}/${tpg}/acls/$target create mapped_lun=$nextlun tpg_lun_or_backstore=/backstores/block/$diskids write_protect=0
  echo targetcli iscsi/iqn${iqn}/${tpg}/acls/$target create mapped_lun=$nextlun tpg_lun_or_backstore=/backstores/block/$diskids write_protect=0

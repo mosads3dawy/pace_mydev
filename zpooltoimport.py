@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 import subprocess, sys
-from ioperf import ioperf
+import os
 from logqueue import queuethis, initqueue
 from etcdput import etcdput as put
 from etcdgetpy import etcdget as get 
@@ -44,6 +44,18 @@ def selecthost(poolinfo,readies):
         #    selectedhost[1] = selectedhost[1] + [ host ]
     return selectedhost
         
+def poolonline(pool):
+ # "zpool reguid / export / import ..." wait for a transaction group.  On a SUSPENDED pool (its disks are gone) that
+ # wait never ends, in the kernel (state D, not killable), and it holds ZFS's global lock: after that every zpool /
+ # zfs command on the host hangs until the host is rebooted (seen on 2026-10-07, twice).  So such a pool is left
+ # alone here; /pace/closthost.sh (container flavour) gives it its disks back and resumes it first.
+ try:
+  with open('/proc/spl/kstat/zfs/'+pool+'/state') as f:
+   return f.read().strip() in ('ONLINE', 'DEGRADED')   # DEGRADED answers; only SUSPENDED hangs
+ except OSError:
+  return False
+
+
 def zpooltoimport(*args):
  global leader, leaderip, myhost, myhostip, etcdip
  if args[0]=='init':
@@ -69,7 +81,7 @@ def zpooltoimport(*args):
  for poo in poouids:
     print('poouids start')
     pool=poo[0].split('/')[1]
-    if pool in str(mypools):
+    if pool in str(mypools) and poolonline(pool):
         cmdline = 'zpool reguid '+pool
         result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE)
         if result.returncode == 0:
@@ -90,7 +102,6 @@ def zpooltoimport(*args):
    pool = poolline[0].replace('poolnxt/','')
    if pool in str(pools):
     continue
-   ioperf(leaderip, myhost)
    print('pool to be imported now', pool)
    poolid = get(leaderip,'ActPool/'+pool)[0]
    if poolid == '_1':
@@ -105,7 +116,7 @@ def zpooltoimport(*args):
    cmdline= '/usr/sbin/zpool status  '
    result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8')
    print('result',result)
-   if pool in result:
+   if pool in result and poolonline(pool):
     cmdline = 'zpool reguid '+pool
     result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE)
     if result.returncode == 0:
@@ -117,6 +128,18 @@ def zpooltoimport(*args):
     dosync('actpool_', 'sync/ActPool/Add_'+pool+'_'+guid+'/request','actpool_'+str(stamp()))
     dels(etcdip, 'poouids/'+pool) 
 
+    # container flavour: the pool is visible in every node (one kernel), its owner is written on the pool
+    if os.path.exists('/.dockerenv') or os.path.isdir('/sys/class/net/eth10'):
+        subprocess.run(['/pace/cpoolowner.sh','set',myhost,pool])
+    # the cache (L2ARC) must sit on the node that owns the pool: a cache disk of another -- or a lost -- node is
+    # replaced by a local one.  DGsetPool did this for a manual import only; a pool taken over after its owner
+    # died comes through here.
+    try:
+        res = subprocess.run(['/usr/bin/python3','/TopStor/fixcachelocality.py',leaderip,pool,myhost],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
+        with open('/root/fixcachelocality.log','a') as f:
+            f.write(str(stamp())+' '+pool+' '+myhost+'\n'+res.stdout.decode('utf-8','replace')+'\n')
+    except Exception as e:
+        print('fixcachelocality failed:',e)
     put(etcdip, 'dirty/volume','0')
     #put(etcdip, 'poouids/'+pool,myhost)
     print('before sync')
@@ -158,7 +181,9 @@ def zpooltoimport(*args):
         nxthost=selecthost(poolinfo,readies)
         print('nxthosts',nxthost)
         poolnxt=get(leaderip,'poolnxt/'+pool)[0]
-        if poolnxt in str(nxthost):
+        # exact comparison: "poolnxt in str(nxthost)" was True for an EMPTY stored value ('' is a substring of every
+        # string), so a pool whose poolnxt had been emptied was never assigned to a node again and never imported
+        if poolnxt == nxthost:
             continue 
         print('adding')
         #dels(leaderip,'poolnxt/'+pool)
@@ -193,9 +218,3 @@ if __name__=='__main__':
     initqueue(leaderip, myhost) 
     initgetpoolstoimport(leader,leaderip,myhost,myhostip)
     zpooltoimport('hi')
- #cmdline='cat /pacedata/perfmon'
- #perfmon=str(subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout)
- #if '1' in perfmon:
- # queuethis('zpooltoimport.py','start','system')
- #if '1' in perfmon:
- # queuethis('zpooltoimport.py','stop','system')

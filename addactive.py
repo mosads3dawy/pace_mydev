@@ -16,11 +16,6 @@ def dosync(leader,*args):
 
 
 def addactive(leader, myhost):
- perfmon = '0'
- #with open('/pacedata/perfmon','r') as f:
- # perfmon = f.readline() 
- #if '1' in perfmon:
- # queuethis('addknown.py','start','system')
  toactivate=get('toactivate','--prefix')
  if toactivate != []:
   for x in toactivate:
@@ -42,8 +37,6 @@ def addactive(leader, myhost):
    put('tosync','yes')
  else:
   print('toactivate is empty')
- if '1' in perfmon:
-  queuethis('addknown.py','stop','system')
 
 
 if __name__=='__main__':

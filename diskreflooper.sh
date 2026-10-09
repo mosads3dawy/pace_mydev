@@ -6,7 +6,7 @@ myhost=`echo $@ | awk '{print $2}'`
 myhostip=`echo $@ | awk '{print $4}'`
 diskref() {
 cd /pace
-/pace/diskref.sh $leader $leaderip $myhost $myhostip 
+/pace/cdiskref.sh $leader $leaderip $myhost $myhostip 
 }
 
 while true 

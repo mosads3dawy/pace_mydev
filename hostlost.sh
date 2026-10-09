@@ -1,6 +1,13 @@
 #!/bin/sh
 cd /pace
 echo $@ `date` > /root/hostlost
+# container flavour: a dead node leaves its iSCSI target and its imported pools in the kernel all nodes share.
+# The leader removes them and exports the pools, so the normal take over (poolnxt -> zpooltoimport.py) can run.
+[ -f /TopStor/flavor.sh ] && . /TopStor/flavor.sh
+if is_container 2>/dev/null && [ "`echo $@ | awk '{print $1}'`" = "`echo $@ | awk '{print $3}'`" ]
+then
+	setsid nohup /pace/closthost.sh `echo $@ | awk '{print $5}'` >/dev/null 2>&1 </dev/null &
+fi
 #export PATH=/bin:/usr/bin:/sbin:/usr/sbin:/root
 leader=`echo $@ | awk '{print $1}'`
 leaderip=`echo $@ | awk '{print $2}'`

@@ -57,7 +57,27 @@ echo sed $hostname for $hostn on $runningpools >> /root/Host
 echo running keysend >> /root/Host
 /pace/keysend.sh $hostip
 echo finish keysend >> /root/Host
-/sbin/reboot
+# --- SIGNAL REBOOT VIA etcd ---
+# Do NOT call /sbin/reboot directly: in this privileged container that
+# would call the host kernel's reboot(2) syscall and reboot the entire
+# host machine. Instead, write the etcd key that the running
+# rebootmepls.sh watcher is polling. The watcher will reset state and
+# trigger /TopStor/docker_setup.sh reboot, which ends in
+# /TopStor/reboot.sh — a container-safe power-cycle analog.
+myhost=`hostname -s`
+reboot_reason='pls_fromhostmanualconfig'
+reboot_written=0
+for etcd_ip in "$hostip" "$myhostip" "127.0.0.1"; do
+    if [ -n "$etcd_ip" ] && /TopStor/etcdput.py "$etcd_ip" rebootme/$myhost $reboot_reason 2>/dev/null; then
+        echo "[hostmanualconfig] signaled reboot via etcd at $etcd_ip"
+        reboot_written=1
+        break
+    fi
+done
+if [ "$reboot_written" -ne 1 ]; then
+    echo "[hostmanualconfig] WARNING: failed to signal reboot to etcd (any endpoint)"
+fi
+exit 0
 
 echo logging all is good >> /root/Host
 fi

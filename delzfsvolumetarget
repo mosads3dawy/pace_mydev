@@ -2,7 +2,6 @@
 cd /TopStor
 export ETCDCTL_API=3
 echo $@ > /root/VolumeDeleteISCSI 
-perfmon=`cat /pacedata/perfmon`
 volname=`echo $@ | awk '{print $2}'`;
 pDG=`echo $@ | awk '{print $1}'`;
 userreq=` echo $@ | awk '{print $3}'`;

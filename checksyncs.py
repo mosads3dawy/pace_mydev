@@ -16,19 +16,17 @@ from time import time as timestamp
 from etctocron import etctocron 
 from collectconfig import collectConfig
 
-REBOOT_REQUIRED = False
-
 dirtydic = { 'pool': 0, 'volume': 0 } 
-syncanitem = [ 'getconfig','cversion','priv','dirty','hostdown', 'replipart','evacuatehost','Snapperiod', 'cron','UsrChange', 'GrpChange', 'user','group','nextlead','cluip','ipaddr', 'namespace', 'tz','ntp','gw','dns','cf', 'log', 'bond' ]
+syncanitem = [ 'getconfig','priv','dirty','hostdown', 'replipart','evacuatehost','Snapperiod', 'cron','UsrChange', 'GrpChange', 'user','group','nextlead','cluip','ipaddr', 'namespace', 'tz','ntp','gw','dns','cf', 'log', 'bond' ]
 special1 = [ 'passwd' ]
 forReceivers = [ 'user', 'group', 'GrpChange', 'UsrChange' ] + special1
-wholeetcd = [ 'etherports','offlinethis','localrun','known','nmspce','gateway','deens','enteepe', 'teezee','ceecee', 'pool','pools','cversion', 'needtoreplace','Partnr', 'Snappreiod','leader', 'running','volumes','ports', 'offlines','diskref', 'ports', 'cachespares']
+wholeetcd = [ 'etherports','offlinethis','localrun','known','nmspce','gateway','deens','enteepe', 'teezee','ceecee', 'pool','pools', 'needtoreplace','Partnr', 'Snappreiod','leader', 'running','volumes','ports', 'offlines','diskref', 'ports', 'cachespares']
 etcdonly = [ 'cleanlost','balancedtype','sizevol', 'ActPool', 'alias', 'hostipsubnet', 'allowedPartners','activepool', 'poolnxt','pools', 'logged','ActivePartners','configured','ready', 'pool']
 restartetcd = wholeetcd + etcdonly
 replisyncs = ['user','group', 'UsrChange', 'GrpChange']
 syncs = etcdonly + syncanitem + special1 + wholeetcd
 
-noinit = [ 'getconfig','cversion', 'replipart' , 'evacuatehost','hostdown','namespace' , 'ipaddr','cluip']
+noinit = [ 'getconfig', 'replipart' , 'evacuatehost','hostdown','namespace' , 'ipaddr','cluip']
 ##### sync request etcdonly template: sync/Operation/ADD/Del_oper1_oper2_../request Operation_stamp###########
 ##### sync request syncanitem with bash script: sync/Operation/commandline_oper1_oper2_../request Operation_stamp###########
 ##### sync request syncanitem with python script: sync/Operation/syncfn_commandline_oper1_oper2_../request Operation_stamp###########
@@ -37,35 +35,30 @@ noinit = [ 'getconfig','cversion', 'replipart' , 'evacuatehost','hostdown','name
 ##### synced template for initial sync for known nodes : sync/Operation/initial/node Operation_stamp #######################
 ##### delete request of same sync if ActivePartners qty reached #######################
 
-def _reboot_if_required():
-    """Checks the global flag and reboots the system if set."""
-    global REBOOT_REQUIRED
-    if REBOOT_REQUIRED:
-        print("checksyncs.py has completed. Executing scheduled reboot for bond changes.")
-        os.sync() 
-        subprocess.run(["/usr/bin/systemctl", "reboot"])
+def signal_reboot_via_etcd(etcd_endpoint, myhost, reason):
+    """
+    Write the etcd key that the running rebootmepls.sh watcher is polling
+    so it will fire /TopStor/docker_setup.sh reboot (which ends in
+    /TopStor/reboot.sh — a container-safe power-cycle analog).
 
-#atexit.register(_reboot_if_required)
+    Do NOT call /TopStor/reboot.sh directly from here: that helper is
+    invoked exactly once per cycle by rebootmepls.sh. Writing the etcd
+    key is the canonical "I need a reboot" signal in this codebase;
+    see syncbonds.sh, Evacuate.py, Evacuatelocal.py for the same
+    pattern. Inside this privileged container, /sbin/reboot or
+    `systemctl reboot` would reboot the HOST kernel, not just us.
+    """
+    key = 'rebootme/' + myhost
+    try:
+        put(etcd_endpoint, key, reason)
+        print(f"[checksyncs] signaled reboot via etcd {etcd_endpoint} key={key} value={reason}")
+    except Exception as exc:
+        print(f"[checksyncs] WARNING: failed to write {key}={reason} to {etcd_endpoint}: {exc}")
 
 software = 'na'
 def insync(leaderip, leader):
     print('checking in sync -------------------')
     isinsync = 1 
-    if isinsync == 1:
-        mycversion=get(leaderip,'cversion/'+leader)[0]
-        allcversion=get(leaderip,'cversion','--prefix')
-        readis = get(leaderip,'ready','--prefix')
-        for cver in allcversion:
-            if cver[1] != mycversion and cver[0].replace('cversion/','') in str(readis):
-            #if cver[1] != mycversion and cver[0].replace('cversion/',''): 
-                #stampi = str(timestamp())
-                #put(leaderip,'sync/cversion/__checksy__/request','cversion_'+stampi)
-                print('version mismatch')
-                isinsync = 0
-                break
-        #if isinsync == 1:
-        #    dels(leaderip,'sync/cversion','--prefix')
-    
      
     if isinsync == 1:
         result = get(leaderip,'nodedirty','--prefix')
@@ -75,6 +68,7 @@ def insync(leaderip, leader):
         allsyncs=get(leaderip,'sync','--prefix')
         allsyncs=[x for x in allsyncs if 'initial' not in x[0] ]
         for sync in allsyncs:
+            # sync/cversion requests are no longer handled here; scripts that still post them must not block insync
             syncgroup = [ x for x in allsyncs if sync[1] in x[1] and 'cversion' not in x[0] ]
             initrequest = [ x for x in syncgroup if 'request/dhcp' not in x[0] ]
             if len(syncgroup) > 0 and len(initrequest) == 0 :
@@ -153,8 +147,8 @@ def doinitsync(leader,leaderip,myhost, myhostip, syncinfo,pullsync='pullavail',p
         cmdline = f"/TopStor/syncbonds.sh {leaderip}"        
         result = subprocess.run(cmdline.split(), stderr=subprocess.STDOUT)
         if result.returncode == 10:
-            print("Bond config changed. Queuing system reboot for after syncs complete.")
-            REBOOT_REQUIRED = True
+            print("Bond config changed. Signaling reboot via etcd for after syncs complete.")
+            signal_reboot_via_etcd(leaderip, myhost, 'pls_fromsyncs')
  if sync not in syncs:
   print('there is a sync that is not defined:',sync)
   return 
@@ -179,14 +173,20 @@ def doinitsync(leader,leaderip,myhost, myhostip, syncinfo,pullsync='pullavail',p
 
 def syncall(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
  global syncs, syncanitem, forReceivers, etcdonly, allsyncs
+ # The requests that are pending NOW are covered by the initial syncs below (those copy the leader's
+ # current keys), so they are marked done without being applied.  The list must be taken BEFORE the
+ # initial syncs: a request posted while they run (this node's own nextlead announcement at the end of
+ # docker_setup.sh, for one) is not covered by a copy that was already made, and marking it done lost it --
+ # the node then kept nextlead/er = None and never took over when the leader died.  Such a request now
+ # stays pending and the syncrequest looper applies it.
+ allrequests = get(leaderip,'sync','--prefix')
+ otherrequests = [ x for x in allrequests if '/request/dhcp' not in str(x) and 'initial' not in str(x) ] 
+
  allinitials = get(leaderip,'sync','initial')
  myinitials = [ x for x in allinitials if 'initial' in str(x)  and '/request/dhcp' not in str(x) ] 
  for syncinfo in myinitials:
    doinitsync(leader,leaderip,myhost,myhostip, syncinfo,pullsync)
 
- allrequests = get(leaderip,'sync','--prefix')
- otherrequests = [ x for x in allrequests if '/request/dhcp' not in str(x) and 'initial' not in str(x) ] 
- 
  for done in otherrequests:
       put(leaderip,done[0]+'/'+myhost,done[1])
       synckeys(leaderip,myhostip, done[0], done[0]) 
@@ -265,9 +265,6 @@ def replisyncrequest(replirev, leader,leaderip,myhost, myhostip):
             result=subprocess.run(cmdline.split(),stderr=subprocess.STDOUT)
       elif 'getconfig' in sync:
         collectConfig(leaderip, myhost)
-      elif sync in 'cversion':
-        cmdline='/TopStor/myrepopull.sh '+opers[1]
-        result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
       elif sync in 'Snapperiod' :
        synckeys(leaderip,myhostip, sync,sync)
        etctocron(leaderip)
@@ -353,8 +350,11 @@ def replisyncrequest(replirev, leader,leaderip,myhost, myhostip):
       #cmdline='/TopStor/'+opers[0].split(':')[1]+' '+result+' '+opers[2] +' '+ opers[3]
       #result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
    if sync not in syncs:
+    # skip it, never stop: a 'return' here dropped every later request on every pass.  A node that came
+    # back after a fail over met an old sync/cversion request first (not handled here any more) and so
+    # never applied anything again -- stale nextlead/er, cluster never in sync.
     print('there is a sync that is not defined:',sync)
-    return
+    continue
    if flag == 1 and evacuateflag == 0:
     print(';;;;;;;;;;;;;;;;;;;;updating the remote leader')
     putnoport(leaderip,pport,syncleft+'/dhcp'+myalias, stamp)
@@ -448,13 +448,10 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
         cmdline ="/TopStor/syncbonds.sh "+etcdip
         result = subprocess.run(cmdline.split(), stderr=subprocess.STDOUT)
         if result.returncode == 10:
-            print("Bond config changed. Queuing system reboot for after syncs complete.")
-            REBOOT_REQUIRED = True
+            print("Bond config changed. Signaling reboot via etcd for after syncs complete.")
+            signal_reboot_via_etcd(etcdip, myhost, 'pls_fromsyncs')
       elif 'getconfig' in sync:
         collectConfig(leaderip, myhost)
-      elif sync in 'cversion':
-        cmdline='/TopStor/systempull.sh '+opers[1]
-        result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
       elif sync in 'Snapperiod' :
        synckeys(leaderip,myhostip, sync,sync)
        etctocron(leaderip)
@@ -540,8 +537,11 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
       #cmdline='/TopStor/'+opers[0].split(':')[1]+' '+result+' '+opers[2] +' '+ opers[3]
       #result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
    if sync not in syncs:
+    # skip it, never stop: a 'return' here dropped every later request on every pass.  A node that came
+    # back after a fail over met an old sync/cversion request first (not handled here any more) and so
+    # never applied anything again -- stale nextlead/er, cluster never in sync.
     print('there is a sync that is not defined:',sync)
-    return
+    continue
    if flag == 1 and evacuateflag == 0:
     if 'sync' in pullsync:
         put(leaderip,pullsync+syncleft+'/'+myhost, stamp)
@@ -555,8 +555,6 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
     print('2;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;')
     put(myhostip, syncleft+'/'+myhost, stamp)
      
- cmdline = '/TopStor/getcversion.sh '+leaderip+' '+leader+' '+myhost+' '+'checksync'
- subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT)
  if myhost != leader:
   dones = get(leaderip,'sync','/request/dhcp')
   otherdones = [ x for x in dones if '/request/dhcp' in str(x) ] 

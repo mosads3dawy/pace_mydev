@@ -116,10 +116,4 @@ if __name__=='__main__':
     else:
         etcdip = myhostip
     selectimport(leader, leaderip, myhost, myhostip)
-    #cmdline='cat /pacedata/perfmon'
-    #perfmon=str(subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout)
 
-	#if '1' in perfmon:
-	#	queuethis('selectimport.py','start','system')
-	#if '1' in perfmon:
-	#	queuethis('selectimport.py','stop','system')

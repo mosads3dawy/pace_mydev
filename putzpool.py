@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 import subprocess, json,sys
+import os
 from os import listdir
 from logqueue import queuethis, initqueue
 from etcdput import etcdput as put
@@ -9,13 +10,17 @@ from os.path import getmtime
 
 def putzpool():
  global leader, leaderip, myhost, myip
- perfmon = '0'
  sitechange=0
  replacingroup = ''
  replaceflag = 0
  readyhosts=get(myip, 'ready','--prefix')
  knownpools=[f for f in listdir('/TopStordata/') if 'pdhcp' in f and 'pree' not in f ]
  cmdline='/sbin/zpool status '
+ # container flavour: every node sees every pool (one kernel).  A node reports only the pools it owns
+ # (zfs property topstor:owner, /pace/cpoolowner.sh), as a physical node sees only the pools it imported.
+ if os.path.exists('/.dockerenv') or os.path.isdir('/sys/class/net/eth10'):
+  mine=subprocess.run(['/pace/cpoolowner.sh','mine',myhost],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL).stdout.decode().split()
+  cmdline = '/sbin/zpool status '+' '.join(mine) if len(mine) > 0 else '/bin/true'
  result=subprocess.run(cmdline.split(),stdout=subprocess.PIPE,stderr=subprocess.DEVNULL).stdout
  sty=str(result)[2:][:-3].replace('\\t','').split('\\n')
  cmdline='/bin/lsscsi -is'
@@ -381,8 +386,6 @@ def putzpool():
    dels(leaderip, y[0])
  for y in xnew:
   put(leaderip, y[0],y[1])
- if '1' in perfmon: 
-  queuethis('putzpool.py','stop','system')
  if silveringflag == 'yes':
   put(leaderip,'nodedirty/'+myhost, 'yes')
  else:

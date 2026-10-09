@@ -769,10 +769,6 @@ def spare2(*args):
  
  
 if __name__=='__main__':
- #with open('/pacedata/perfmon','r') as f:
- # perfmon = f.readline() 
- #if '1' in perfmon:
- # queuethis('selectspare.py','start','system')
   leaderip = sys.argv[1]
   myhost = sys.argv[2]
   leader=get(leaderip, 'leader')[0]
@@ -783,5 +779,3 @@ if __name__=='__main__':
    etcdip = myhostip
   getall('init',leader, leaderip, myhost, myhostip, etcdip)
   spare2(sys.argv[1:])
- #if '1' in perfmon:
- # queuethis('selectspare.py','stop','system')

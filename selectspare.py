@@ -436,12 +436,18 @@ def solvedegradedraid(raid,diskname):
     dmstup = subprocess.run(cmddm,stdout=subprocess.PIPE).stdout.decode().split('result_')[1]
  diskuid = diskname
  if 'scsi' in diskname:
-    cmdline2='/sbin/zdb -e -C '+raid['pool']
-    forget=subprocess.run(cmdline2.split(),stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if forget.returncode:
-     cmdline2='/sbin/zdb -C '+raid['pool']
+    # the node image of the container flavour has no zdb: then the guid of the faulty disk is not looked up and the
+    # disk is given to 'zpool replace' by its name (it is still listed by zpool status when it is FAULTED), instead of
+    # the whole selectspare run dying with FileNotFoundError every cycle
+    try:
+     cmdline2='/sbin/zdb -e -C '+raid['pool']
      forget=subprocess.run(cmdline2.split(),stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    forget=forget.stdout.decode().replace(' ','').split('\n')
+     if forget.returncode:
+      cmdline2='/sbin/zdb -C '+raid['pool']
+      forget=subprocess.run(cmdline2.split(),stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+     forget=forget.stdout.decode().replace(' ','').split('\n')
+    except FileNotFoundError:
+     forget=[]
     faultdisk = [ x for x in forget if 'guid' in x or (diskname in x and 'path' in x) ]
     eindex = 0 
     for fa in faultdisk:
@@ -685,10 +691,6 @@ def spare2(*args):
  
  
 if __name__=='__main__':
- #with open('/pacedata/perfmon','r') as f:
- # perfmon = f.readline() 
- #if '1' in perfmon:
- # queuethis('selectspare.py','start','system')
   leaderip = sys.argv[1]
   myhost = sys.argv[2]
   leader=get(leaderip, 'leader')[0]
@@ -699,5 +701,3 @@ if __name__=='__main__':
    etcdip = myhostip
   #getall('init',leader, leaderip, myhost, myhostip, etcdip)
   spare2(sys.argv[1:])
- #if '1' in perfmon:
- # queuethis('selectspare.py','stop','system')

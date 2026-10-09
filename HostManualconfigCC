@@ -16,10 +16,30 @@ oldsubnet=` echo $@ | awk '{ print $4 }'`;
 sed -e "s/HOSTY/$hostip/g" /TopStor/sshhttp.conf > /etc/httpd/conf.d/sshhttp.conf
 sed -e "s/HOSTY/$hostip/g" /TopStor/sshhttp.conf > /etc/httpd/conf.d/sshhttp.conf
 dev=`/sbin/pcs resource show CC | grep Attrib | awk -F'nic=' '{print $2}' | awk '{print $1}'`
-/sbin/zpool export -a 
+/sbin/zpool export -a
 /sbin/pcs resource update CC ip=$hostip
 /sbin/pcs resource update CC cidr_netmask=$subnet
 /sbin/ip addr del ${oldip}/$oldsubnet dev $dev
 /pace/keysend.sh $hostip
 
-/sbin/reboot
+# --- SIGNAL REBOOT VIA etcd ---
+# Do NOT call /sbin/reboot directly: in this privileged container that
+# would call the host kernel's reboot(2) syscall and reboot the entire
+# host machine. Instead, write the etcd key that the running
+# rebootmepls.sh watcher is polling. The watcher will reset state and
+# trigger /TopStor/docker_setup.sh reboot, which ends in
+# /TopStor/reboot.sh — a container-safe power-cycle analog.
+myhost=`hostname -s`
+reboot_reason='pls_fromhostmanualconfigcc'
+reboot_written=0
+for etcd_ip in "$hostip" "$myhostip" "127.0.0.1"; do
+    if [ -n "$etcd_ip" ] && /TopStor/etcdput.py "$etcd_ip" rebootme/$myhost $reboot_reason 2>/dev/null; then
+        echo "[hostmanualconfigcc] signaled reboot via etcd at $etcd_ip"
+        reboot_written=1
+        break
+    fi
+done
+if [ "$reboot_written" -ne 1 ]; then
+    echo "[hostmanualconfigcc] WARNING: failed to signal reboot to etcd (any endpoint)"
+fi
+exit 0

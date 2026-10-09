@@ -17,10 +17,6 @@ def do(leaderip,myhost, *args):
  
  logmsg.initlog(leaderip, myhost)
  initqueue(leaderip, myhost)
- with open('/pacedata/perfmon','r') as f:
-  perfmon = f.readline()
- if '1' in perfmon:
-  queuethis('Evacuate','toremove',args[-1])
  readies=get(leaderip, 'ready','--prefix')
  if len(readies) < 2 and args[-2] in str(readies):
   return

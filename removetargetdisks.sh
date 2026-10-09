@@ -1,4 +1,5 @@
 #!/bin/sh
+[ -f /TopStor/flavor.sh ] && . /TopStor/flavor.sh
 export ETCDCTL_API=3
 cd /TopStor/
 echo $@ > /root/removetargetdisks
@@ -12,6 +13,6 @@ then
  targetcli iscsi/iqn.2016-03.com.$hostname:t1/tpg1/acls/ delete $initiator
  iscsiadm -m node -p $thehostip:3266 -u
 else
- targetcli clearconfig confirm=true
+ if is_container 2>/dev/null; then /TopStor/cleanlioscoped.sh; else targetcli clearconfig confirm=true; fi
  iscsiadm -m node -u
 fi

@@ -26,11 +26,6 @@ def remknown(*args):
      initqueue(leaderip, myhost) 
      return
 
- perfmon = '0'
-# with open('/pacedata/perfmon','r') as f:
-#  perfmon = f.readline() 
-# if '1' in perfmon:
-#  queuethis('remknown.py','start','system')
  known=get(etcdip, 'known','--prefix')
  ready=get(etcdip, 'ready','--prefix')
  nextone=get(etcdip, 'nextlead/er')[0]
@@ -97,8 +92,6 @@ def remknown(*args):
     etcddel(leaderip, pos[0])
    
    
- if '1' in perfmon:
-  queuethis('remknown.py','stop','system')
 
 
 if __name__=='__main__':

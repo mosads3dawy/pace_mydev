@@ -38,9 +38,6 @@ def addknown(leader,myhost):
  allow=get('allowedPartners')
  if 'notallowed' in str(allow):
   return 
-# with open('/pacedata/perfmon','r') as f:
-#  perfmon = f.readline() 
-# queuethis('addknown','start','system')
  possible=get('possible','--prefix')
  if possible != []:
   for x in possible:

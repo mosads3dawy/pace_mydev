@@ -1,4 +1,4 @@
-#!/bin/python
+#!/usr/bin/python3
 import sys, subprocess, re, zlib, json, base64
 from etcdgetpy import etcdget as get 
 from etcdput import etcdput as put

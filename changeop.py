@@ -56,13 +56,7 @@ def initchangeop():
 if __name__=='__main__':
  leader, leaderip, myhost, myhostip, etcdip = sys.argv[1:6]
  initchangeop()
- with open('/pacedata/perfmon','r') as f:
-  perfmon = f.readline() 
- if '1' in perfmon:
-  queuethis('changeop.py','start','system')
  if len(sys.argv[4:]) > 2 and 'scsi' in sys.argv[2]:
    forceoffline(sys.argv[4],sys.argv[-1])
  else: 
    changeop(*sys.argv[1:])
- if '1' in perfmon:
-  queuethis('changeop.py','stop','system')
