@@ -3,7 +3,7 @@
 # All containers of the dev cluster share ONE kernel, so a zpool is visible ("imported") in every node at once,
 # while on physical servers a pool is imported on exactly one node.  The node that owns a pool is therefore
 # written on the pool itself, as the zfs user property  topstor:owner=<host>:
-#   cpoolowner.sh claim <host>          every imported pool that has no owner yet becomes <host>'s
+#   cpoolowner.sh claim <host> [pool]   every imported pool (or only <pool>) that has no owner yet becomes <host>'s
 #   cpoolowner.sh set <host> <pool>     this pool is now <host>'s
 #   cpoolowner.sh mine <host>           the pools of <host>, one per line (putzpool.py reports only these)
 #   cpoolowner.sh of <pool>             the owner of <pool> ('-' when it has none)
@@ -15,7 +15,7 @@ online() { case "`cat /proc/spl/kstat/zfs/$1/state 2>/dev/null`" in ONLINE|DEGRA
 cmd=$1
 case $cmd in
 claim)
-	for p in `ls /proc/spl/kstat/zfs 2>/dev/null | grep '^pdhcp'`; do
+	for p in `if [ -n "$3" ]; then echo $3; else ls /proc/spl/kstat/zfs 2>/dev/null | grep '^pdhcp'; fi`; do
 		online $p || continue
 		[ "`timeout 20 zfs get -H -o value topstor:owner $p 2>/dev/null`" = "-" ] && timeout 20 zfs set topstor:owner=$2 $p 2>/dev/null
 	done ;;

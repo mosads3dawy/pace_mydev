@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import subprocess, json,sys
+import subprocess, time, json,sys
 import os
 from os import listdir
 from logqueue import queuethis, initqueue
@@ -7,6 +7,30 @@ from etcdput import etcdput as put
 from etcdgetpy import etcdget as get 
 from etcddel import etcddel as dels 
 from os.path import getmtime
+
+# Real capacity of a pool in operation: at 90 percent used (used / (used + available) of the pool dataset) a warning goes to the
+# log and the notifications, and again every 2 hours while the pool stays above 90 percent.  The time of the last warning is kept
+# in /TopStordata/capwarn_<pool> on the node that owns the pool.
+def capacitywarn(pool, limit=90, every=7200):
+ try:
+  result=subprocess.run(['/sbin/zfs','get','-Hp','-o','value','used,available',pool],stdout=subprocess.PIPE,timeout=30)
+  used,avail=[int(x) for x in result.stdout.decode().split()[:2]]
+  if used + avail <= 0 or used * 100 < limit * (used + avail):
+   return
+  stamp='/TopStordata/capwarn_'+pool
+  try:
+   with open(stamp) as f:
+    if time.time() - float(f.read().strip()) < every:
+     return
+  except (OSError, ValueError):
+   pass
+  with open(stamp,'w') as f:
+   f.write(str(time.time()))
+  free='%.1fG' % (avail/1024/1024/1024)
+  subprocess.run(['docker','exec','etcdclient','/TopStor/logmsg.py','Poolcap90','warning','system',pool,free],stdout=subprocess.PIPE,timeout=60)
+ except Exception as e:
+  print('capacitywarn',pool,e)
+
 
 def putzpool():
  global leader, leaderip, myhost, myip
@@ -62,7 +86,7 @@ def putzpool():
  # dsk = dev.split(':')[0]
  # if 'sd' in dsk:
  #  drives.append(dsk) 
- cmdline=['/sbin/zfs','list','-t','snapshot,filesystem,volume','-o','name,creation,used,quota,usedbysnapshots,refcompressratio,prot:kind,available,referenced,status:mount,snap:type,partner:receiver,partner:sender','-H']
+ cmdline=['/sbin/zfs','list','-t','snapshot,filesystem,volume','-o','name,creation,used,quota,usedbysnapshots,refcompressratio,prot:kind,available,referenced,status:mount,snap:type,partner:receiver,partner:sender,compression,dedup','-H']
  result=subprocess.run(cmdline,stdout=subprocess.PIPE)
  zfslistall=str(result.stdout)[2:][:-3].replace('\\t',' ').split('\\n')
  #lists=[lpools,ldisks,ldefdisks,lavaildisks,lfreedisks,lsparedisks,lraids,lvolumes,lsnapshots]
@@ -118,6 +142,7 @@ def putzpool():
    zdict={ 'name':b[0],'changeop':b[1], 'availtype':availtype, 'status':b[1],'host':myhost, 'used':str(zused),'available':str(zfslst), 'alloc': str(zlist[2]), 'size': zlist[1], 'empty': zlist[3], 'dedup': zlist[7], 'compressratio': zlist2[2],'timestamp':str(cachetime), 'raidlist': raidlist ,'volumes':volumelist, 'silvering':'no'}
    zpool.append(zdict)
    lpools.append(zdict) 
+   capacitywarn(b[0])
    for vol in zfslist:
     if b[0]+'/' in vol and '@' not in vol and b[0] in vol:
      volume=vol.split()
@@ -125,7 +150,7 @@ def putzpool():
      snaplist=[]
      snapperiod=[]
      snapperiod=[[x[0],x[1]] for x in periods if volname in x[0]]
-     vdict={'fullname':volume[0],'name':volname, 'pool': b[0], 'host':myhost, 'creation':' '.join(volume[1:4]+volume[5:6]),'time':volume[4], 'used':volume[6], 'quota':volume[7], 'usedbysnapshots':volume[8], 'refcompressratio':volume[9], 'prot':volume[10],'available':volume[11], 'referenced':volume[12],'statusmount':volume[13], 'snapshots':snaplist, 'snapperiod':snapperiod}
+     vdict={'fullname':volume[0],'name':volname, 'pool': b[0], 'host':myhost, 'creation':' '.join(volume[1:4]+volume[5:6]),'time':volume[4], 'used':volume[6], 'quota':volume[7], 'usedbysnapshots':volume[8], 'refcompressratio':volume[9], 'prot':volume[10],'available':volume[11], 'referenced':volume[12],'statusmount':volume[13], 'compression':(volume[17] if len(volume) > 17 else '-'), 'dedup':(volume[18] if len(volume) > 18 else '-'), 'snapshots':snaplist, 'snapperiod':snapperiod}
      if 'CIFS_' in volume[10]:
         cmdline = 'zfs get ip:addr -H '+volume[0]
         ipaddr=subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8').split()[2]

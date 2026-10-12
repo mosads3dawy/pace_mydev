@@ -44,6 +44,20 @@ def selecthost(poolinfo,readies):
         #    selectedhost[1] = selectedhost[1] + [ host ]
     return selectedhost
         
+def foreignpool(pool):
+ # container flavour: one kernel for every cluster, so a pool of ANOTHER cluster is visible here.  Its owner (zfs property
+ # topstor:owner, /pace/cpoolowner.sh) is a host this cluster has never known (no ipaddr/<host> key): never import,
+ # reguid or re-own such a pool, and drop what already points at it (seen in QC test 23, QSD5.280).
+ if not (os.path.exists('/.dockerenv') or os.path.isdir('/sys/class/net/eth10')):
+  return False
+ try:
+  owner = subprocess.run(['/pace/cpoolowner.sh','of',pool],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL).stdout.decode().strip()
+ except Exception:
+  return False
+ if owner in ('', '-', myhost):
+  return False
+ return str(get(leaderip,'ipaddr/'+owner)[0]) == '_1'
+
 def poolonline(pool):
  # "zpool reguid / export / import ..." wait for a transaction group.  On a SUSPENDED pool (its disks are gone) that
  # wait never ends, in the kernel (state D, not killable), and it holds ZFS's global lock: after that every zpool /
@@ -55,6 +69,39 @@ def poolonline(pool):
  except OSError:
   return False
 
+
+def poolishere(pool):
+ # container flavour: one kernel, the owner is written on the pool; physical: the pool is imported here or it is not
+ if os.path.exists('/.dockerenv') or os.path.isdir('/sys/class/net/eth10'):
+  try:
+   res = subprocess.run(['/pace/cpoolowner.sh','of',pool],stdout=subprocess.PIPE,timeout=30)
+   return res.stdout.decode('utf-8','replace').strip() in (myhost, '')
+  except Exception:
+   return True       # unknown: keep the marker
+ return os.path.exists('/proc/spl/kstat/zfs/'+pool)
+
+
+def memberimportdir(pool, disks):
+ # a directory of symlinks to the by-id devices (and their partitions) of the disks etcd lists in <pool>; '' when none is present
+ import glob
+ impdir = '/tmp/impdir-'+pool
+ subprocess.run(['rm','-rf',impdir])
+ os.makedirs(impdir, exist_ok=True)
+ found = 0
+ for name, d in disks.items():
+  if d.get('pool') != pool:
+   continue
+  for key in ('actualdisk','zname','name'):
+   dname = str(d.get(key,'')).replace('/dev/disk/by-id/','')
+   if dname and dname != '_1':
+    for dev in glob.glob('/dev/disk/by-id/'+dname+'*'):
+     link = impdir+'/'+os.path.basename(dev)
+     if not os.path.exists(link):
+      os.symlink(dev, link)
+      found += 1
+ if found == 0:
+  return ''
+ return impdir
 
 def zpooltoimport(*args):
  global leader, leaderip, myhost, myhostip, etcdip
@@ -81,13 +128,22 @@ def zpooltoimport(*args):
  for poo in poouids:
     print('poouids start')
     pool=poo[0].split('/')[1]
-    if pool in str(mypools) and poolonline(pool):
+    # Ours is decided by the pool itself (owner property / imported here), not by the pools list of etcd: right after a
+    # take over that list still names the old host for a few seconds, the marker was dropped in that window and the pool kept
+    # its old id for ever (seen in QC test 14, QSD5.304: the returning node imported its stale leg and the data was lost).
+    if not poolishere(pool):
+        dels(etcdip, 'poouids/'+pool)      # the pool is not ours any more (taken over elsewhere or deleted): nothing to retry here
+        continue
+    if poolonline(pool):
         cmdline = 'zpool reguid '+pool
-        result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE)
+        result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        with open('/root/poouids.log','a') as f:
+            f.write(str(stamp())+' '+pool+' reguid rc='+str(result.returncode)+' '+result.stderr.decode('utf-8','replace')+'\n')
         if result.returncode == 0:
             print('done')
             cmdline="zpool get guid "+pool+" -H "
             guid=subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8').split()[2]
+            dels(leaderip,'sync/ActPool', pool)
             put(leaderip,'ActPool/'+pool,guid)
             dosync('actpool_', 'sync/ActPool/Add_'+pool+'_'+guid+'/request','actpool_'+str(stamp()))
             dels(etcdip, 'poouids/'+pool) 
@@ -102,12 +158,23 @@ def zpooltoimport(*args):
    pool = poolline[0].replace('poolnxt/','')
    if pool in str(pools):
     continue
+   if foreignpool(pool):
+    print('pool of another cluster, not imported', pool)
+    dels(leaderip, 'poolnxt', pool)
+    dels(leaderip, 'pools', pool)
+    continue
    print('pool to be imported now', pool)
    poolid = get(leaderip,'ActPool/'+pool)[0]
    if poolid == '_1':
     poolid = pool
+   # Import only from the disks that are members of this pool (etcd), so a stale leg that kept the pool's name but was
+   # detached while its node was away (old guid, free disk now) can never be imported as the pool and then be re-attached over.
    cmdline= '/usr/sbin/zpool import '+poolid
-   dels(leaderip, 'poolnxt', pool ) 
+   impdir = memberimportdir(pool, getall(leaderip)['disks'])
+   if impdir:
+    cmdline= '/usr/sbin/zpool import -d '+impdir+' '+poolid
+   # poolnxt/<pool> is the only trigger of this import: it is deleted only after the import worked (below).  It used to be deleted here,
+   # before the import, so one failed first try (the disk session of the survivor was not up yet after a take over) orphaned the pool for ever.
    print(cmdline)
    put(leaderip, 'pools/'+pool,myhost)
    res = subprocess.run(cmdline.split(),stdout=subprocess.PIPE)
@@ -117,16 +184,27 @@ def zpooltoimport(*args):
    result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8')
    print('result',result)
    if pool in result and poolonline(pool):
+    dels(leaderip, 'poolnxt', pool )      # imported: the assignment is done
+    # The pool is imported by its id (ActPool/<pool>), and a new id is given right after the import, so the next import
+    # (by the id every node knows) finds only the devices that took part in THIS import: a disk that was away meanwhile
+    # keeps the old id and can no longer be imported as the pool.  ZFS refuses 'zpool reguid' on a pool that is not healthy,
+    # and after a take over the pool is degraded (the dead node's disk is missing) until the missing disk is replaced.
+    # That refusal was ignored: the old id was stored again, nothing retried, and the next take over imported the stale
+    # disk of the dead node and lost what had been written meanwhile.  Now a refused reguid keeps the old id published
+    # and leaves a retry marker (poouids/<pool>) that the loop at the top of this function works off as soon as the pool is healthy.
     cmdline = 'zpool reguid '+pool
-    result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE)
+    result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     if result.returncode == 0:
        print('done')
-    cmdline="zpool get guid "+pool+" -H "
-    guid=subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8').split()[2]
-    dels(leaderip,'sync/ActPool', pool)
-    put(leaderip,'ActPool/'+pool,guid)
-    dosync('actpool_', 'sync/ActPool/Add_'+pool+'_'+guid+'/request','actpool_'+str(stamp()))
-    dels(etcdip, 'poouids/'+pool) 
+       cmdline="zpool get guid "+pool+" -H "
+       guid=subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8').split()[2]
+       dels(leaderip,'sync/ActPool', pool)
+       put(leaderip,'ActPool/'+pool,guid)
+       dosync('actpool_', 'sync/ActPool/Add_'+pool+'_'+guid+'/request','actpool_'+str(stamp()))
+       dels(etcdip, 'poouids/'+pool) 
+    else:
+       print('reguid refused (pool not healthy yet), retried later:', result.stderr.decode('utf-8','replace'))
+       put(etcdip, 'poouids/'+pool, myhost)
 
     # container flavour: the pool is visible in every node (one kernel), its owner is written on the pool
     if os.path.exists('/.dockerenv') or os.path.isdir('/sys/class/net/eth10'):
@@ -151,9 +229,8 @@ def zpooltoimport(*args):
     #cmdline= 'systemctl restart zfs-zed  '
     #result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8')
    else:
-    dels(leaderip, 'pools/',pool)
+    dels(leaderip, 'pools/',pool)         # not imported (yet): poolnxt stays, the next round (9 s) tries again
         
-   dels(leaderip, 'poolnxt',pool)
     
  if myhost != leader:
   return

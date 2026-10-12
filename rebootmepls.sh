@@ -22,8 +22,17 @@ then
 		echo S$configured  | egrep 'yes|reset'
 		if [ $? -ne 0 ];
 		then
-			rm -rf /TopStordata/*
-			configured='no'
+			# QSD5.312: a missing configured/<me> record (not yet written/synced on the leader, or unreadable) is not
+			# "never configured": a node that already joined (nodeconfigured says yes) must keep its configuration,
+			# or the reboot wipes /TopStordata and the node comes back as its own primary (test 10 round 17).
+			echo S`cat /root/nodeconfigured 2>/dev/null` | grep '^Syes'
+			if [ $? -eq 0 ];
+			then
+				configured='yes'
+			else
+				rm -rf /TopStordata/*
+				configured='no'
+			fi
 		fi
  		echo ${configured}_$isreboot > /root/nodeconfigured
  		./etcdput.py $leaderip rebootme/$myhost donot 

@@ -8,7 +8,7 @@ from etcdputnoport import etcdput as putnoport
 from etcdput import etcdput as put 
 from Evacuatelocal import setall
 from etcddel import etcddel as dels
-from usersyncall import usersyncall, usrfninit, oneusersync
+from usersyncall import usersyncall, usrfninit, oneusersync, pulladminhash
 from groupsyncall import groupsyncall, grpfninit, onegroupsync
 from socket import gethostname as hostname
 from etcdsync import synckeys
@@ -20,7 +20,7 @@ dirtydic = { 'pool': 0, 'volume': 0 }
 syncanitem = [ 'getconfig','priv','dirty','hostdown', 'replipart','evacuatehost','Snapperiod', 'cron','UsrChange', 'GrpChange', 'user','group','nextlead','cluip','ipaddr', 'namespace', 'tz','ntp','gw','dns','cf', 'log', 'bond' ]
 special1 = [ 'passwd' ]
 forReceivers = [ 'user', 'group', 'GrpChange', 'UsrChange' ] + special1
-wholeetcd = [ 'etherports','offlinethis','localrun','known','nmspce','gateway','deens','enteepe', 'teezee','ceecee', 'pool','pools', 'needtoreplace','Partnr', 'Snappreiod','leader', 'running','volumes','ports', 'offlines','diskref', 'ports', 'cachespares']
+wholeetcd = [ 'etherports','offlinethis','localrun','known','nmspce','gateway','deens','enteepe', 'teezee','ceecee', 'pool','pools', 'needtoreplace','Partnr', 'apikeys', 'Snappreiod','leader', 'running','volumes','ports', 'offlines','diskref', 'ports', 'cachespares']
 etcdonly = [ 'cleanlost','balancedtype','sizevol', 'ActPool', 'alias', 'hostipsubnet', 'allowedPartners','activepool', 'poolnxt','pools', 'logged','ActivePartners','configured','ready', 'pool']
 restartetcd = wholeetcd + etcdonly
 replisyncs = ['user','group', 'UsrChange', 'GrpChange']
@@ -56,6 +56,28 @@ def signal_reboot_via_etcd(etcd_endpoint, myhost, reason):
         print(f"[checksyncs] WARNING: failed to write {key}={reason} to {etcd_endpoint}: {exc}")
 
 software = 'na'
+def reqorder(item):
+ """Order of a pending sync request = the time it was filed, in integer nanoseconds.
+ The value of a request is <kind>_<name>_<stamp> (user_usr1_<ns>, group_grp1_<ns>) or <kind>_<stamp> (UsrChange_<ns>,
+ GrpChange_<ns>, passwd_<seconds.fraction>) or <kind>_initial_<seconds>.  It used to be sorted by the second field, which is the
+ NAME for user_/group_ and the stamp for UsrChange_/GrpChange_: digits sort before letters, so the change of a user's groups was
+ always processed before the user was created on the node, found no user ('id' failed) and was dropped (group race, test 22).
+ 'initial' requests (full copies) go first, then the single changes in the order they were made (UnixAddUser files UsrChange
+ 10 ns after user)."""
+ val = str(item[1])
+ if '_initial_' in val:
+  return 0
+ last = val.split('_')[-1]
+ try:
+  if '.' in last:
+   return int(float(last)*1000000000)
+  n = int(last)
+ except ValueError:
+  return 0
+ while 0 < n < 100000000000000000:     # seconds / milliseconds / microseconds -> nanoseconds
+  n *= 1000
+ return n
+
 def insync(leaderip, leader):
     print('checking in sync -------------------')
     isinsync = 1 
@@ -220,7 +242,7 @@ def replisyncrequest(replirev, leader,leaderip,myhost, myhostip):
     etcdip = myhostip
     myrequests = [ x for x in newallsyncs if x[1] not in mysyncs  and '/request/'+leader in x[0] ] 
  if len(myrequests) > 1:
-     myrequests.sort(key=lambda x: x[1].split('_')[1], reverse=False)
+     myrequests.sort(key=reqorder, reverse=False)
  
  print('myrequests are', myrequests)
  for syncinfo in myrequests:
@@ -239,7 +261,9 @@ def replisyncrequest(replirev, leader,leaderip,myhost, myhostip):
    opers= syncleft.split('/')[2].split('_')
    print('#########################################################################')
    print('the sync',sync)
-   if sync in wholeetcd+special1 :
+   # 'passwd' is handled below by pulladminhash + UnixChangePass; synckeysnoport (etcdsyncnoport.py) is unfinished (undefined 'noport',
+   # ignores the tunnel port) and was never imported here, so the NameError ended the whole pull for every password change
+   if sync in wholeetcd :
     if sync == 'Partnr':
       print('iam here')
       synckeysnoport(leaderip, pport, leaderip, 'Partner', 'Partner')
@@ -342,6 +366,7 @@ def replisyncrequest(replirev, leader,leaderip,myhost, myhostip):
             result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
    if sync in special1 :
       try:
+       pulladminhash(opers[1])   # the receiver must hold the sender's new hash before UnixChangePass reads it from etcd
        cmdline='/TopStor/'+opers[0]+' '+opers[1]+' '+opers[2]
        print('replipass',cmdline)
        result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
@@ -394,7 +419,7 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
     print('iiiiiiiiiiiiiiiiiiiiiiiiiihere')
  if len(myrequests) > 1:
     print('multiple requests',myrequests)
-    myrequests.sort(key=lambda x: x[1].split('_')[1], reverse=False)
+    myrequests.sort(key=reqorder, reverse=False)
  print('myrequests are', myrequests)
  for syncinfo in myrequests:
   evacuateflag = 0
@@ -530,6 +555,12 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
 
    if sync in special1 :
       try:
+       if myhost != leader:
+        # UnixChangePass reads the hash from THIS node's etcd; nothing copied the leader's new hash here, so a
+        # follower kept (and after a fail over the cluster went back to) the old password
+        newhash = str(get(leaderip,'usershash/'+opers[1])[0]).replace('\n','')
+        if newhash not in ('_1','-1','','None') and len(newhash) > 3:
+         put(myhostip,'usershash/'+opers[1],newhash)
        cmdline='/TopStor/'+opers[0]+' '+opers[1]+' '+opers[2]
        result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
       except:

@@ -62,7 +62,8 @@ then
 fi
 targetcli iscsi/iqn${iqn}/${tpg} set attribute demo_mode_write_protect=0 
 targetcli iscsi/iqn${iqn}/${tpg} set attribute cache_dynamic_acls=1
-targetcli iscsi/iqn${iqn}/${tpg} set attribute generate_node_acls=1 
+# only the initiators listed on the LUN (the acls created above) may log in: generate_node_acls=1 gave every other IQN a dynamic ACL with all LUNs mapped
+targetcli iscsi/iqn${iqn}/${tpg} set attribute generate_node_acls=0
 targetcli iscsi/iqn${iqn}/${tpg} set attribute authentication=0
 targetcli iscsi/iqn${iqn}/${tpg} set auth userid=$chapuser 
 targetcli iscsi/iqn${iqn}/${tpg} set auth password=$chappas

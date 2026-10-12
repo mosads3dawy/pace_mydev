@@ -13,12 +13,21 @@ def etcdctl(etcd, key,prefix):
  result=subprocess.run(cmdline,stdout=subprocess.PIPE)
  return result 
  
+def _lines(result):
+ # etcdctl prints "key\nvalue\n" per entry; an EMPTY value is an empty line that has to stay a line.  Collapsing "\n\n" (as it
+ # was done) made every entry after a key with an empty value pair up shifted (value of the entry before = key of the next),
+ # so a pool listed after an emptied poolnxt key was never seen by the import loop.
+ out = str(result.stdout.decode())
+ if out.endswith('\n'):
+  out = out[:-1]
+ return out.split('\n') if out != '' else []
+
 def etcdget(etcd, key, prefix=''):
  result = etcdctl(etcd, key,prefix)
  z=[]
  try:
   if(prefix =='--prefix'):
-   mylist=str(result.stdout.decode()).replace('\n\n','\n').split('\n')
+   mylist=_lines(result)
    zipped=zip(mylist[0::2],mylist[1::2])
    for x in zipped:
     z.append(x) 
@@ -29,7 +38,7 @@ def etcdget(etcd, key, prefix=''):
     z.append((str(result.stdout).split(key)[1][2:][:-3]))
   else:
    result = etcdctl(etcd,key,'--prefix')
-   mylist=str(result.stdout.decode()).replace('\n\n','\n').split('\n')
+   mylist=_lines(result)
    zipped=zip(mylist[0::2],mylist[1::2])
    for x in zipped:
     if prefix in str(x):

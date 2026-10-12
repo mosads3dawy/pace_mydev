@@ -155,7 +155,8 @@ def getpoolstoimport():
       devname=z[5].replace('/dev/','')
       disknotfound=0
       if z[3].split('-')[0] not in str(internalls):
-        freepool.remove(lss)
+        if lss in freepool:   # the same device twice in one listing (two paths / two labels of the pool) must not abort the whole round
+         freepool.remove(lss)
       break
     if disknotfound == 1:
       diskid=0

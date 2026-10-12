@@ -61,6 +61,15 @@ for p in $orphans; do
 		log "pool $p: $missing disk(s) did not come back -- left as it is, NOT exported"
 		continue
 	fi
+	# QSD5.313: the orphan list was read at the start; the leader's take-over import may have run since (it sets the owner
+	# right after the import).  Exporting such a pool unmounts it under the share containers that start with the import
+	# (they keep the empty mountpoint: test 14 round 17, FILEX_MISSING).  Only a pool still owned by the lost host (or by
+	# nobody / unreadable) is exported.
+	own=`/pace/cpoolowner.sh of $p`
+	if [ -n "$own" ] && [ "$own" != "-" ] && [ "$own" != "$lost" ]; then
+		log "pool $p: already taken over by $own -- NOT exported"
+		continue
+	fi
 	timeout 60 zpool clear $p >/dev/null 2>&1
 	n=0; while [ $n -lt 30 ] && [ "`cat /proc/spl/kstat/zfs/$p/state 2>/dev/null`" != "ONLINE" ]; do sleep 2; n=$((n+2)); timeout 60 zpool clear $p >/dev/null 2>&1; done
 	if [ "`cat /proc/spl/kstat/zfs/$p/state 2>/dev/null`" != "ONLINE" ] || ! timeout 30 zfs set topstor:resumed=`date +%s` $p >/dev/null 2>&1; then
@@ -71,6 +80,11 @@ for p in $orphans; do
 		log "pool $p exported -- it can be imported by the node the leader names"
 	else
 		log "pool $p: export refused (see above) -- left imported"
+		# a refused export has already unmounted the datasets (libzfs unmounts first): the pool stays imported but
+		# nothing is mounted, putzpool's test write into /<pool> fails and marks the leg UNAVAILABLE, so no spare is
+		# ever chosen (QC test 14 round 11).  Mount them again, as an import does.
+		for ds in `zfs list -H -o name -r $p 2>/dev/null`; do timeout 30 zfs mount $ds >/dev/null 2>&1; done
+		log "pool $p: datasets mounted again: `zfs list -H -o mounted -r $p 2>/dev/null | tr '\n' ' '`"
 	fi
 done
 log "done"

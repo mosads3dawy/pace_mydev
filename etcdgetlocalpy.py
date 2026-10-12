@@ -18,7 +18,7 @@ def etcdget(key, prefix=''):
  z=[]
  try:
   if(prefix =='--prefix'):
-   mylist=str(result.stdout.decode()).replace('\n\n','\n').split('\n')
+   mylist=(lambda o: (o[:-1] if o.endswith('\n') else o).split('\n') if o else [])(str(result.stdout.decode()))   # an empty value stays an (empty) line: collapsing it shifted every later key/value pair
    zipped=zip(mylist[0::2],mylist[1::2])
    for x in zipped:
     z.append(x) 
@@ -29,7 +29,7 @@ def etcdget(key, prefix=''):
     z.append((str(result.stdout).split(key)[1][2:][:-3]))
   else:
    result = etcdctl(key,'--prefix')
-   mylist=str(result.stdout.decode()).replace('\n\n','\n').split('\n')
+   mylist=(lambda o: (o[:-1] if o.endswith('\n') else o).split('\n') if o else [])(str(result.stdout.decode()))   # an empty value stays an (empty) line: collapsing it shifted every later key/value pair
    zipped=zip(mylist[0::2],mylist[1::2])
    for x in zipped:
     if prefix in str(x):
