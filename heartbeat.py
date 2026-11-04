@@ -179,6 +179,8 @@ def heartbeat(*args):
         knownsn = len(knowns)
         if tries < 10: 
            hostlost(leader, leaderip)
+        elif myhost == leader:
+           leadernextlead(knowns)
 
         # Recovery: ActivePartners that are NOT in knowns were hostlost'd earlier.
         # Nmap them and re-publish membership keys if they're reachable again.
@@ -196,8 +198,6 @@ def heartbeat(*args):
                     hostfound(phost, pip)
         except Exception:
             pass
-        elif myhost == leader:
-           leadernextlead(knowns)
         for known in knowns:
             host = known[0].split('/')[1]
             if host == myhost:

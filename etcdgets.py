@@ -33,4 +33,4 @@ try:
   print(str(result.stdout).split(key)[1][2:][:-3])
  
 except:
- print('('_1')')
+ print('(_1)')
