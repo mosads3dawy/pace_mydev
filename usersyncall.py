@@ -14,6 +14,30 @@ def usrfninit(ldr,ldrip,hst,hstip,pprt='-1'):
  return
 allusers = []
 
+def usersgroups(username, pullsync=False):
+ """comma separated groups (never Everyone, which UnixChangeUser always adds) of the sender that list `username` as a member;
+ the user's own name when there is none (what UnixAddUser/UnixChangeUser always accepted: a group named like the user is skipped)."""
+ try:
+  if pullsync:
+   groups = getnoport(leaderip,pport,'usersigroup','--prefix')
+  else:
+   groups = get(leaderip,'usersigroup','--prefix')
+ except Exception as e:
+  print('usersgroups: cannot read the groups', e)
+  return username
+ found = []
+ for grp in groups:
+  try:
+   name = grp[0].replace('usersigroup/','')
+   members = grp[1].split('/')[2].split(',')
+  except Exception:
+   continue
+  # a group that does not exist on this node yet (initial sync: users come before groups) would make usermod refuse the whole
+  # list, Everyone included: groupsyncall adds the members of such a group right after
+  if name != 'Everyone' and name != username and username in members and name not in found and subprocess.run(['getent','group',name],stdout=subprocess.DEVNULL).returncode == 0:
+   found.append(name)
+ return ','.join(found) if found else username
+
 def thread_add(user,syncip, tosync='pullavail'):
  global myusers
  global allusers, leader ,leaderip, myhost, myhostip,pport
@@ -42,7 +66,12 @@ def thread_add(user,syncip, tosync='pullavail'):
  usergd=userinfo[1]
  usersplit = user[1].split('/')
  homePool = usersplit[1]
- usergroups = usersplit[2] 
+ # usersinfo/<user> = <id>:<gd>:/<pool>/<user>/<size>/<privileges>: field 2 is the USER NAME, never its groups.  The groups of the
+ # user are the usersigroup/<group> entries (value <id>:<gd>:<home>/<size>/<members>/...) that list it as a member.  The receiver
+ # used to hand its own name to UnixAddUser as the groups, so a user replicated with a live change lost its group membership
+ # (only Everyone was applied) -- the later UsrChange request is not a safe carrier: it is filed 10 s after the change started
+ # and is applied before the user exists on the receiver when the sender is slow.
+ usergroups = usersgroups(username, pullsync=('pullsync' in tosync))
  userpass = userhash
  size = usersplit[3]
  HomeAddr = usersplit[-3]
