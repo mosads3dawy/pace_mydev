@@ -654,6 +654,9 @@ def restetcd(leader,leaderip, myhost,myhostip):
             synckeys(leaderip, myhostip, 'Partner', 'Partner')
         else:
             synckeys(leaderip,myhostip, sync,sync)
+    # a follower that was down/hung when the leader named the next leader never gets the one-shot sync/nextlead/Add_er request
+    # (pruned meanwhile; syncall runs only for never-initialised nodes), so take the leader's value on every start
+    synckeys(leaderip, myhostip, 'nextlead', 'nextlead')
  
 runcmd={'Snapperiod':'etctocron'} 
 synctypes={'syncinit':syncinit, 'syncrequest':syncrequest, 'syncall':syncall , 'restetcd': restetcd}
