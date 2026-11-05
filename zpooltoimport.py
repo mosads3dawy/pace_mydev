@@ -153,6 +153,56 @@ def memberimportdir(pool, disks):
   return ''
  return impdir
 
+STALESECS = 300
+
+def guardlog(msg):
+ print(msg)
+ try:
+  with open('/root/zpooltoimport-guard.log','a') as f:
+   f.write(str(stamp())+' '+msg+'\n')
+ except OSError:
+  pass
+
+def seenbyscan(impdir, poolid):
+ # the pool (by its id, or by its name when no ActPool id is known) is listed by a scan of the member disks only
+ import re
+ try:
+  res = subprocess.run(['/usr/sbin/zpool','import','-d',impdir],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
+ except (OSError, subprocess.TimeoutExpired):
+  return False
+ out = res.stdout.decode('utf-8','replace')
+ pat = r'^\s*(id|pool):\s*'+re.escape(str(poolid))+r'\s*$'
+ return re.search(pat, out, re.M) is not None
+
+def nomemberhere(pool, poolline, owner):
+ # poolnxt/<pool> names me but no disk that etcd lists for <pool> is present here and no ready host lists the pool (checked
+ # by the caller): no import.  Right after a take over the own iSCSI disks may still be missing, so the keys are kept for
+ # STALESECS; after that the LEADER deletes poolnxt/<pool> and (if it names me) pools/<pool>, by exact key and value.
+ # ActPool/<pool> is kept: the only copy of the pool may sit on a node that is off now (note 116).
+ mark = '/root/zpooltoimport-nomember.'+pool
+ now = stamp()
+ try:
+  with open(mark) as f:
+   since = float(f.read().strip())
+ except (OSError, ValueError):
+  since = now
+  try:
+   with open(mark,'w') as f:
+    f.write(str(now))
+  except OSError:
+   pass
+ if now - since < STALESECS or myhost != leader:
+  guardlog('pool '+pool+': no member disk here, not imported (no key removed, '+str(int(now-since))+' s, leader '+str(leader)+')')
+  return
+ guardlog('pool '+pool+': no member disk here for '+str(int(now-since))+' s and no ready host lists it: stale keys removed')
+ dels(leaderip, poolline[0], str((poolline[0], poolline[1])))
+ if owner == myhost:
+  dels(leaderip, 'pools/'+pool, str(('pools/'+pool, myhost)))
+ try:
+  os.remove(mark)
+ except OSError:
+  pass
+
 def zpooltoimport(*args):
  global leader, leaderip, myhost, myhostip, etcdip
  if args[0]=='init':
@@ -236,10 +286,21 @@ def zpooltoimport(*args):
     poolid = pool
    # Import only from the disks that are members of this pool (etcd), so a stale leg that kept the pool's name but was
    # detached while its node was away (old guid, free disk now) can never be imported as the pool and then be re-attached over.
-   cmdline= '/usr/sbin/zpool import '+poolid
+   # Never a plain 'zpool import <id>' (it scans every device of the host): with no member disk here there is nothing of this
+   # cluster to import, and a leftover disk or a deleted pool of the same id could be imported (QC test 22 validator 643d B,
+   # P-DEVELOPMENT note 116).  The stale poolnxt/pools keys are removed by the leader after STALESECS (nomemberhere()).
    impdir = memberimportdir(pool, getall(leaderip)['disks'])
-   if impdir:
-    cmdline= '/usr/sbin/zpool import -d '+impdir+' '+poolid
+   if not impdir:
+    nomemberhere(pool, poolline, owner)
+    continue
+   try:
+    os.remove('/root/zpooltoimport-nomember.'+pool)
+   except OSError:
+    pass
+   if not seenbyscan(impdir, poolid):
+    print('pool', pool, 'id', poolid, 'is not seen by zpool import -d', impdir, ': not imported in this round')
+    continue
+   cmdline= '/usr/sbin/zpool import -d '+impdir+' '+poolid
    # poolnxt/<pool> is the only trigger of this import: it is deleted only after the import worked (below).  It used to be deleted here,
    # before the import, so one failed first try (the disk session of the survivor was not up yet after a take over) orphaned the pool for ever.
    print(cmdline)

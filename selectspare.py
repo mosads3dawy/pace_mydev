@@ -400,90 +400,92 @@ def solvestriperaids(striperaids,freedisks,allraids):
   usedfree.append(ret)
  return
  
+def sslog(*args):
+ msg = ' '.join(str(x) for x in args)
+ print(msg)
+ try:
+  with open('/root/solvedegraded.log','a') as f:
+   f.write(str(stamp())+' '+msg+'\n')
+ except OSError:
+  pass
+
+def runout(cmd, secs=30):
+ # output of a read-only command, '' when it is missing, fails or hangs (a hung zpool must not hang the whole pass)
+ try:
+  res = subprocess.run(cmd,stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=secs)
+ except (OSError, subprocess.TimeoutExpired):
+  return ''
+ if res.returncode:
+  return ''
+ return res.stdout.decode('utf-8','replace')
+
+def zerodmnames():
+ # normalized names (dm-N and the mapper name) of the dm "zero" stubs of this host; None when they cannot be read
+ table = runout(['dmsetup','table'], 10)
+ if table == '':
+  return None     # dmsetup missing or failed: every dm leg counts as a stub (conservative)
+ zeros = set()
+ for line in table.split('\n'):
+  if ':' in line and ' zero' in line.split(':',1)[1]:
+   zeros.add(line.split(':',1)[0].strip())
+ out = set(zeros)
+ try:
+  for dm in os.listdir('/sys/block'):
+   if dm.startswith('dm-'):
+    try:
+     with open('/sys/block/'+dm+'/dm/name') as f:
+      if f.read().strip() in zeros:
+       out.add(dm)
+    except OSError:
+     pass
+ except OSError:
+  return None
+ return out
+
 def solvedegradedraid(raid,diskname):
+ # A disk of one of my pools is not ONLINE.  The old code made a dm "zero" device, ran 'zpool replace <pool> <guid> /dev/dm-N'
+ # and detached the guid.  The guid came from the zdb config by POSITION (faultdisk[eindex-1], eindex 0 when nothing
+ # matched = the last leaf of the pool): QC test 22 validator 643d saw it pick node3's HEALTHY leg; the "resilver" into
+ # /dev/zero finished at once, ZFS detached the healthy leg, erased its labels and the pool SUSPENDED (P-DEVELOPMENT note 116).
+ # Now: the faulty vdev is found by identity only (vdevsafe.plan), nothing is done without a unique match, the target must be
+ # UNAVAIL/FAULTED/REMOVED/OFFLINE in 'zpool status -gP' with another real ONLINE leg next to it, and a dead mirror leg is
+ # only offlined (FAULTED/REMOVED) or left as it is (UNAVAIL/OFFLINE: it resilvers when it comes back).  No dm stub any more.
  global leader, leaderip, myhost, myhostip, etcdip
+ from vdevsafe import plan
  if 'dm-' in str(diskname):
     return
- print('diskname', diskname)
- if 'replacing' in diskname:
+ if 'replacing' in str(diskname):
     return
- hosts=get(etcdip, 'ready','--prefix')
- hosts=[host[0].split('/')[1] for host in hosts]
- raidhosts= set()
- defdisk = [] 
- disksample = []
- sparedisk = []
- if 'stripe' in raid['name']:
-    #cmdline2=['/sbin/zpool', 'detach',raid['pool'], disk['actualdisk']]
-    cmdline2=['/sbin/zpool', 'detach',raid['pool'], diskname ]
-    forget=subprocess.run(cmdline2,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    print('detaching the faulty disk',forget.stderr.decode())
-    return
- defdisk.append(diskname)
- dmcmd=['zpool', 'status']
- dminuse = subprocess.run(dmcmd,stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().split()
- dmcmd=['zpool','import']
- dminuse = dminuse + subprocess.run(dmcmd,stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().split()
- dminuse = [ 'dm-'+x.split('dm-')[1].split(' ')[0] for x in dminuse  if 'dm-' in x ] + [ 'dm-1', 'dm-0' ]
- dmcmd = '/pace/lstdm.sh'
- dmstuplst = subprocess.run(dmcmd.split(),stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().split()
- dmstup = '0'
- for dm in dmstuplst:
-    if dm not in str(dminuse) or 'was /dev/'+dm in (dminuse):
-     dmstup = dm
- if dmstup == '0':
-    cmddm= ['/pace/mkdm.sh']
-    dmstup = subprocess.run(cmddm,stdout=subprocess.PIPE).stdout.decode().split('result_')[1]
- diskuid = diskname
- if 'scsi' in diskname:
-    # the node image of the container flavour has no zdb: then the guid of the faulty disk is not looked up and the
-    # disk is given to 'zpool replace' by its name (it is still listed by zpool status when it is FAULTED), instead of
-    # the whole selectspare run dying with FileNotFoundError every cycle
-    try:
-     cmdline2='/sbin/zdb -e -C '+raid['pool']
-     forget=subprocess.run(cmdline2.split(),stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-     if forget.returncode:
-      cmdline2='/sbin/zdb -C '+raid['pool']
-      forget=subprocess.run(cmdline2.split(),stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-     forget=forget.stdout.decode().replace(' ','').split('\n')
-    except FileNotFoundError:
-     forget=[]
-    faultdisk = [ x for x in forget if 'guid' in x or (diskname in x and 'path' in x) ]
-    eindex = 0 
-    for fa in faultdisk:
-     if diskname in fa:
-      eindex = faultdisk.index(fa)
-      break
-    print('faultdisk',faultdisk, diskname)
-    diskuid = diskname
-    if len(faultdisk) > 0:
-        diskuid = faultdisk[eindex-1].split(':')[1]
-    
-    
- cmdline2=['/sbin/zpool', 'replace','-f',raid['pool'], diskuid,'/dev/'+dmstup]
- forget=subprocess.run(cmdline2,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
- sleep(2)
- cmdline2=['/sbin/zpool', 'offline',raid['pool'],'/dev/'+dmstup]
- forget2=subprocess.run(cmdline2,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
- sleep(2)
- cmdline2=['/sbin/zpool', 'detach',raid['pool'],diskuid]
- forget2=subprocess.run(cmdline2,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
- sleep(2)
-
- with open('/root/dmproblem','w') as f:
-    f.write('cmdline '+ " ".join(cmdline2)+'\n')
-    f.write('result: '+forget2.stdout.decode()+'\n')
-    f.write('result: '+forget2.stderr.decode()+'\n')
-    f.write('dmstuplst[0]: '+str(dmstuplst)+'\n')
- print('forgetting the dead disk result by internal dm stup',forget.stderr.decode())
- print('returncode',forget.returncode,dmstuplst)
- if forget.returncode == 0:
-    put(etcdip, dmstuplst[0][0],'inuse/'+dmstup)
+ pool = raid['pool']
+ try:
+  with open('/proc/spl/kstat/zfs/'+pool+'/state') as f:
+   pstate = f.read().strip()
+ except OSError:
+  pstate = ''
+ if pstate not in ('ONLINE', 'DEGRADED'):
+  sslog('pool', pool, 'state', repr(pstate), ': nothing done for', diskname)
+  return
+ gstatus = runout(['/sbin/zpool','status','-gP',pool])
+ pstatus = runout(['/sbin/zpool','status','-P',pool])
+ zdbtext = ''
+ if os.path.exists('/TopStordata/'+pool):
+  zdbtext = runout(['/sbin/zdb','-U','/TopStordata/'+pool,'-C',pool])
+ zdbtext = zdbtext or runout(['/sbin/zdb','-C',pool]) or runout(['/sbin/zdb','-e','-C',pool])
+ stripe = 'stripe' in raid['name']
+ action, guid, reason = plan(diskname, zdbtext, gstatus, pstatus, zerodmnames(), needparent=not stripe)
+ sslog('pool', pool, 'raid', raid['name'], 'disk', diskname, '->', action, guid, ':', reason)
+ if action == 'detach':
+    cmdline2=['/sbin/zpool', 'detach', pool, guid]
+ elif action == 'offline':
+    cmdline2=['/sbin/zpool', 'offline', pool, guid]
  else:
-    if forget.returncode != 255:
-     dels(etcdip, dmstuplst[0][0], '--prefix')
-     #delstolocal(dmstuplst[0][0], '--prefix')
-     return  
+    return
+ try:
+  forget=subprocess.run(cmdline2,stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+  sslog(' '.join(cmdline2), 'rc', forget.returncode, forget.stderr.decode('utf-8','replace').strip())
+ except subprocess.TimeoutExpired:
+  sslog(' '.join(cmdline2), 'timed out')
+ return
 
 def solvetheasks(needtoreplace):
     global leader, leaderip, myhost, myhostip, etcdip
@@ -570,6 +572,18 @@ def spare2(*args):
         print('will do:', poolname, raidname, rmdiskname, adiskname)
         cmdline2=['/sbin/zpool', 'replace','-f',poolname, rmdiskname,adiskname]
         print(cmdline2)
+      # the genuine spare replacement (a real free disk takes the place of a leg; ZFS keeps the old leg as the resilver
+      # source until the new one is complete): only onto a real disk seen by this host, and only on a pool that answers
+      # (note 116: never resilver onto a dm stub, never touch a SUSPENDED pool)
+      try:
+       with open('/proc/spl/kstat/zfs/'+poolname+'/state') as f:
+        pstate = f.read().strip()
+      except OSError:
+       pstate = ''
+      anew = adiskname.replace('/dev/disk/by-id/','')
+      if pstate not in ('ONLINE', 'DEGRADED') or 'dm-' in anew or not (os.path.exists('/dev/disk/by-id/'+anew) or os.path.exists('/dev/'+anew)):
+       sslog('needtoreplace', poolname, rmdiskname, '->', adiskname, 'refused: pool state', repr(pstate), 'or the new disk is not a real disk here')
+       continue
       forget=subprocess.run(cmdline2,stdout=subprocess.PIPE, stderr=subprocess.PIPE)
       print('forget',forget.returncode)
       print('cmdline2'," ".join(cmdline2))
