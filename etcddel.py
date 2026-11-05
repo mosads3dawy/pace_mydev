@@ -46,7 +46,11 @@ def etcddel(etcd, *args):
       continue
   cmdline=['etcdctl','--user=root:YN-Password_123','--endpoints='+endpoints,'del',key]
   cmdline=['etcdctl','--endpoints='+endpoints,'del',key]
-  result=subprocess.run(cmdline,stdout=subprocess.PIPE)
+  try:
+   result=subprocess.run(cmdline,stdout=subprocess.PIPE, timeout=2)
+  except:
+   print('no reachable')
+   continue
   err = result.returncode
   reslist=str(result.stdout)[2:][:-3]
   if '1' in reslist:
