@@ -180,22 +180,127 @@ def scanimportable(out, pool, poolid):
  # pure parser of 'zpool import -d <dir>' output: True when exactly ONE listed pool has this NAME and this exact numeric ID and a
  # state 'zpool import' accepts without -f (ONLINE / DEGRADED).  Other pools in the scan are ignored (a disk of this node may
  # still carry the labels of another, deleted pool: QC test 22 643e, node1 sdc/sde = pdhcp288205696 id 9940180792541655089).
+ # A block whose status/action text (before 'config:') says the pool is or was in use by another system, or needs '-f', is
+ # refused (validator 643e F2).
  if not re.match(r'^[0-9]+$', str(poolid)):
   return False                     # expected id unknown: never import by a scan
  blocks, cur = [], None
  for line in out.splitlines():
   m = re.match(r'^\s*pool:\s*(\S+)\s*$', line)
   if m:
-   cur = {'pool': m.group(1)}
+   cur = {'pool': m.group(1), 'text': '', 'inconfig': False}
    blocks.append(cur)
    continue
   if cur is None:
    continue
+  if re.match(r'^\s*config:\s*$', line):
+   cur['inconfig'] = True
+  if not cur['inconfig']:
+   cur['text'] += ' ' + line.strip()
   m = re.match(r'^\s*(id|state):\s*(\S+)\s*$', line)
   if m and m.group(1) not in cur:
    cur[m.group(1)] = m.group(2)
  hits = [b for b in blocks if b.get('pool') == pool and b.get('id') == str(poolid)]
- return len(hits) == 1 and hits[0].get('state') in ('ONLINE', 'DEGRADED')
+ if len(hits) != 1 or hits[0].get('state') not in ('ONLINE', 'DEGRADED'):
+  return False
+ if re.search(r"another system|'-f'|(^|\s)-f(\s|$)", hits[0]['text'], re.I):
+  return False
+ return True
+
+def anysuspended():
+ # a SUSPENDED pool holds the ZFS namespace lock; a 'zpool import' scan then sits in D state and timeout= cannot end it
+ # (validator 643e F3): no scan while any pool of this kernel is SUSPENDED
+ import glob
+ for f in glob.glob('/proc/spl/kstat/zfs/*/state'):
+  try:
+   with open(f) as fh:
+    if fh.read().strip() == 'SUSPENDED':
+     return True
+  except OSError:
+   pass
+ return False
+
+def peersilent(pool, host, ip):
+ # True when <host> (ip) has not answered a ping for OWNERDOWNSECS in a row (mark file per pool and host); any answer resets it
+ mark = '/root/zpooltoimport-peerdown.'+pool+'.'+host
+ answered = False
+ for _ in range(3):
+  try:
+   if subprocess.run(['ping','-c','1','-W','1',ip],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode == 0:
+    answered = True
+    break
+  except (OSError, subprocess.TimeoutExpired):
+   pass
+ now = stamp()
+ if answered:
+  try:
+   os.remove(mark)
+  except OSError:
+   pass
+  return False
+ try:
+  with open(mark) as f:
+   since = float(f.read().strip())
+ except (OSError, ValueError):
+  since = now
+  try:
+   with open(mark,'w') as f:
+    f.write(str(now))
+  except OSError:
+   pass
+ return now - since >= OWNERDOWNSECS
+
+def peersclear(pool, alldsks, readyhosts):
+ # By-scan import only (no member disk listed; validator 643e F1).  A node that boots as PRIMARY wipes hosts/ and ready/
+ # (docker_setup.sh) and its own etcd copy may name itself in pools/<pool>: then no guard above pings the real holder, whose
+ # live leg the scan would show here.  So EVERY other host in ActivePartners/ must be either ready with a published
+ # hosts/<h>/current that does not list the pool, or silent to ping for OWNERDOWNSECS.  Otherwise: no import this round.
+ partners = get(leaderip, 'ActivePartners', '--prefix', strict=True)
+ if 'not reachable' in str(partners):
+  guardlog('pool '+pool+': ActivePartners not readable, no by-scan import in this round')
+  return False
+ currents = {}
+ for x in alldsks:
+  if isinstance(x, tuple) and len(x) > 1:
+   currents[str(x[0])] = str(x[1])
+ clear = True
+ for x in partners:
+  if not isinstance(x, tuple) or len(x) < 2 or len(str(x[0]).split('/')) < 2:
+   continue
+  host, ip = str(x[0]).split('/')[1], str(x[1])
+  if host in ('', myhost):
+   continue
+  cur = currents.get('hosts/'+host+'/current')
+  if host in readyhosts and cur is not None:
+   if re.search(r'[\'"]'+re.escape(pool)+r'[\'"]', cur):
+    guardlog('pool '+pool+': listed in hosts/'+host+'/current, no by-scan import')
+    clear = False
+   continue
+  if not re.match(r'^([0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
+   guardlog('pool '+pool+': partner '+host+' has no usable address and no published current: no by-scan import in this round')
+   clear = False
+   continue
+  if peersilent(pool, host, ip):
+   guardlog('pool '+pool+': partner '+host+' '+ip+' silent for '+str(OWNERDOWNSECS)+' s, not a holder')
+   continue
+  guardlog('pool '+pool+': partner '+host+' '+ip+' answers or was silent < '+str(OWNERDOWNSECS)+' s and has no published current'
+           +(' (not ready)' if host not in readyhosts else '')+': no by-scan import in this round')
+  clear = False
+ return clear
+
+def legpaths(pool):
+ # after a by-scan import: log the device paths ZFS chose; warn when a leg is not an iSCSI scsi-/wwn- path (validator 643e F4)
+ try:
+  res = subprocess.run(['/usr/sbin/zpool','status','-P',pool],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+ except (OSError, subprocess.TimeoutExpired):
+  guardlog('pool '+pool+': zpool status -P failed after the by-scan import')
+  return
+ paths = re.findall(r'(/dev/\S+)', res.stdout.decode('utf-8','replace'))
+ guardlog('pool '+pool+': by-scan import legs '+' '.join(paths))
+ for pth in paths:
+  base = os.path.basename(pth)
+  if not (base.startswith('scsi-') or base.startswith('wwn-')):
+   guardlog('WARNING pool '+pool+': leg '+pth+' is not a scsi-/wwn- device')
 
 def localscan(pool, poolid):
  # cold start / sole survivor: no pool is imported anywhere, so hosts/*/current shows every disk as free ('pree') and
@@ -203,6 +308,9 @@ def localscan(pool, poolid):
  # /dev/disk/by-id (60 s timeout), matched by the exact expected id AND name (scanimportable()).
  if not re.match(r'^[0-9]+$', str(poolid)):
   return False
+ if anysuspended():
+  guardlog('pool '+pool+': a SUSPENDED pool is present, no by-id scan in this round')
+  return None
  try:
   res = subprocess.run(['/usr/sbin/zpool','import','-d',BYID],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
  except (OSError, subprocess.TimeoutExpired):
@@ -328,12 +436,19 @@ def zpooltoimport(*args):
    byscan = False
    if not impdir:
     # No disk is listed as a member (cold start / sole survivor: nothing is imported anywhere, every disk is 'pree').  The checks
-    # above already made sure that no host lists the pool in hosts/*/current and that pools/<pool> is absent, mine, or names a
-    # host that is not ready and silent for OWNERDOWNSECS.  Import only if a scan of this node's own disks lists exactly this
-    # pool id AND name as importable (P-DEVELOPMENT note 117); never with an unknown id, never another pool of the scan.  While
-    # it does, the stale-key removal (nomemberhere) is not run, so poolnxt is no longer deleted and re-created in a loop.
-    if not localscan(pool, poolid):
+    # above made sure that no host lists the pool in hosts/*/current and that pools/<pool> is absent, mine, or names a host that
+    # is not ready and silent for OWNERDOWNSECS.  Import only if a scan of this node's own disks lists exactly this pool id AND
+    # name as importable and every other ActivePartners host is ready with a published current that does not list the pool or
+    # is silent for OWNERDOWNSECS (peersclear(); a node that boots as primary wiped hosts/ and ready/) -- P-DEVELOPMENT note 117.
+    # Never with an unknown id, never another pool of the scan.  While the scan shows the pool importable (or cannot run because
+    # a pool is SUSPENDED) the stale-key removal (nomemberhere) is not run: no poolnxt delete/re-create loop.
+    seen = localscan(pool, poolid)
+    if seen is None:
+     continue
+    if not seen:
      nomemberhere(pool, poolline, owner)
+     continue
+    if not peersclear(pool, alldsks, readyhosts):
      continue
     impdir = BYID
     byscan = True
@@ -358,6 +473,14 @@ def zpooltoimport(*args):
    print('result',result)
    if pool in result and poolonline(pool):
     dels(leaderip, 'poolnxt', pool )      # imported: the assignment is done
+    if byscan:
+     legpaths(pool)
+     import glob
+     for mk in glob.glob('/root/zpooltoimport-peerdown.'+pool+'.*'):
+      try:
+       os.remove(mk)
+      except OSError:
+       pass
     try:
      os.remove('/root/zpooltoimport-ownerdown.'+pool)
     except OSError:
