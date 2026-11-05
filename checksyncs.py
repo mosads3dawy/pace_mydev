@@ -88,7 +88,9 @@ def insync(leaderip, leader):
             isinsync = 0 
     if isinsync == 1:
         allsyncs=get(leaderip,'sync','--prefix')
-        allsyncs=[x for x in allsyncs if 'initial' not in x[0] ]
+        # only real requests and acks count: a key with 'request' only in its VALUE (broken ack-of-ack, see syncrequest) is no
+        # sync; it kept isinsync at 'no' for ever (QC test 22 step 16.5, QSD5.315)
+        allsyncs=[x for x in allsyncs if 'initial' not in x[0] and '/request' in x[0] ]
         for sync in allsyncs:
             # sync/cversion requests are no longer handled here; scripts that still post them must not block insync
             syncgroup = [ x for x in allsyncs if sync[1] in x[1] and 'cversion' not in x[0] ]
@@ -111,6 +113,21 @@ def insync(leaderip, leader):
         print('some nodes still syncing')
         put(leaderip,'isinsync', 'no')
         
+def isbadack(x):
+    # broken ack (QC test 22 step 16.5): a key under sync/ without '/request' whose value is exactly '/request'.  Never a request
+    # key, never sync/<x>/initial/*; conservative on purpose: anything else is left alone.
+    return (isinstance(x,tuple) and len(x) == 2 and str(x[0]).startswith('sync/') and '/request' not in str(x[0])
+            and '/initial/' not in str(x[0]) and x[1] == '/request')
+
+def delexact(etcdip, key):
+    # 'etcdctl del <key>' without --prefix removes exactly this one key
+    if not isbadack((key,'/request')):
+        return
+    try:
+        subprocess.run(['etcdctl','--endpoints=http://'+etcdip+':2379','del',key],stdout=subprocess.PIPE,timeout=10)
+    except Exception:
+        pass
+
 def initchecks(leader, leaderip, myhost, myhostip):
     if leader == myhost:
         return leaderip
@@ -402,6 +419,12 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
  else:
     etcdip = myhostip
  allsyncs = get(leaderip,'sync','request') 
+ # A request is a key containing '/request' (root '.../request' or '.../request/') that is not an ack '.../request/dhcpX'.
+ # get() also returns entries that match only by their VALUE: a malformed key once gave the ack '...::<phrase>/dhcpA' =
+ # '/request', which was then taken for a request and got one more '/'+myhost child each pass, for ever (unbounded sync/Partnr
+ # growth, isinsync no, QC test 22 step 16.5, QSD5.315).  Such entries are never requests; the exact ones are deleted below.
+ badacks = [ x for x in allsyncs if isinstance(x,tuple) and len(x) == 2 and '/request' not in x[0] ]
+ allsyncs = [ x for x in allsyncs if x not in badacks ]
  if 'pullsync' in pullsync:
     print('allsyncs',pullsync,allsyncs)
  donerequests = [ x for x in allsyncs if '/request/dhcp' in str(x) ] 
@@ -573,6 +596,9 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
     # never applied anything again -- stale nextlead/er, cluster never in sync.
     print('there is a sync that is not defined:',sync)
     continue
+   # defence in depth: an ack is only ever written for a request key ('.../request'), never for an ack or a key without it
+   if '/request' not in syncleft or '/request/dhcp' in syncleft:
+    continue
    if flag == 1 and evacuateflag == 0:
     if 'sync' in pullsync:
         put(leaderip,pullsync+syncleft+'/'+myhost, stamp)
@@ -590,6 +616,12 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
   dones = get(leaderip,'sync','/request/dhcp')
   otherdones = [ x for x in dones if '/request/dhcp' in str(x) ] 
   localdones = get(myhostip, 'sync', '--prefix')
+  # same clean-up of this node's local copies of the broken acks (the follower put above wrote them), exact key only
+  if 'pullsync' not in pullsync:
+   for done in localdones:
+    if isbadack(done):
+     delexact(myhostip, done[0])
+  localdones = [ x for x in localdones if not isbadack(x) ]
   for done in otherdones:
    if str(done) not in str(localdones):
     put(myhostip, done[0],done[1])
@@ -603,6 +635,11 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
   print(set(get(myhostip,'sync','UsrChange')+['hi'])-set(get(leaderip,'sync','UsrChange')))
   print('hihihihi-----------------------------------------')
  else:
+  # delete the broken acks by their EXACT key: etcddel's substring / --prefix modes could also hit good keys
+  if 'pullsync' not in pullsync:
+   for bad in badacks:
+    if isbadack(bad):
+     delexact(leaderip, bad[0])
   actives = len(get(leaderip,'ActivePartners','--prefix')) 
   receivers = get(leaderip,'Partner','Receiver') 
   if '_1' == receivers[0]:
