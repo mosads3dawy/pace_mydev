@@ -16,6 +16,25 @@ def dosync(*args):
   put(leaderip, args[0]+'/'+leader,args[1])
   return 
 
+import re
+BAD = ('', '_1', 'not reachable')
+
+def restartargsok(reslist, ippos, what):
+    # A share container is removed (undockerthis.sh) and its start script is called only when every value of the new start is
+    # known to be valid.  A failed read of the leader etcd gave '_1' here, the running share was removed and cifs.py/cifs.sh
+    # got shifted arguments (QC test 22 step 18, QSD5.315).
+    global leader, leaderip, myhost, myhostip, etcdip
+    try:
+        values = [leader, leaderip, myhost, myhostip, etcdip, reslist[0], reslist[1], reslist[ippos], reslist[ippos+1]]
+    except IndexError:
+        print('VolumeCheck: short volume line, nothing done for', what, reslist)
+        return False
+    if any(str(v).strip() in BAD for v in values) \
+       or not re.match(r'^([0-9]{1,3}\.){3}[0-9]{1,3}$', reslist[ippos]) or not re.match(r'^[0-9]{1,2}$', reslist[ippos+1]):
+        print('VolumeCheck: bad restart values, share left as it is', what, values)
+        return False
+    return True
+
 def getippos(vtype):
     print('vtype',vtype)
     if vtype in ['cifs', 'home']:
@@ -113,6 +132,8 @@ def nfsnew( etcds, replis, dockers):
  for res in dirtyset:
    reslist=res.split('/')
    print('update',reslist[1])
+   if not restartargsok(reslist, getippos('nfs'), res):
+     continue
    cmdline = '/TopStor/undockerthis.sh '+reslist[getippos('nfs')]
    result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8')
    left='volumes/NFS/'+myhost+'/'+'/'.join(reslist[0:2])
@@ -133,6 +154,8 @@ def cifs( etcds, replis, dockers):
  for res in dirtyset:
    reslist=res.split('/')
    print('update',reslist[1])
+   if not restartargsok(reslist, getippos('cifs'), res):
+     continue
    cmdline = '/TopStor/undockerthis.sh '+reslist[7]
    result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8')
    if 'DOMAIN' in str(res):
@@ -162,6 +185,8 @@ def homes(etcds, replis, dockers):
  for res in dirtyset:
    reslist=res.split('/')
    print('update',reslist[1])
+   if not restartargsok(reslist, getippos('home'), res):
+     continue
    cmdline = '/TopStor/undockerthis.sh '+reslist[7]
    result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8')
    left='volumes/HOMEE/'+myhost+'/'+'/'.join(reslist[0:2])
@@ -239,14 +264,25 @@ def volumecheck(etcds, replis, *args):
 if __name__=='__main__':
   leaderip = sys.argv[1]
   myhost = sys.argv[2]
-  leader=get(leaderip, 'leader')[0]
-  myhostip=get(leaderip,'ready/'+myhost)[0] 
+  # Fail closed (QC test 22 step 18, QSD5.315): while the leader etcd cannot be read (take over, leader restart, partition)
+  # the non-strict reads gave leader = myhostip = etcdip = '_1' and an EMPTY volume list, which looked like "no volume is
+  # in etcd": every local volume was dirty on every pass (getdirtyvols), its running share was removed and restarted with
+  # '_1' arguments.  A failed read now ends the pass without touching anything; the next pass (10 s) reads again.
+  leader=get(leaderip, 'leader', strict=True)[0]
+  myhostip=get(leaderip,'ready/'+myhost, strict=True)[0]
+  if str(leader).strip() in BAD or str(myhostip).strip() in BAD or str(leaderip).strip() in BAD:
+   print('VolumeCheck: leader etcd not readable (leader', leader, 'myhostip', myhostip, '), pass skipped')
+   sys.exit(0)
   if myhost == leader:
    etcdip = leaderip
   else:
    etcdip = myhostip
    
  
-  etcds = get(etcdip, 'volumes','--prefix')
-  replis = get(etcdip, 'replivol','--prefix')
+  etcds = get(etcdip, 'volumes','--prefix', strict=True)
+  replis = get(etcdip, 'replivol','--prefix', strict=True)
+  if etcds == ['not reachable'] or replis == ['not reachable']:
+   # a FAILED read must never count as "volume missing in etcd" (getdirtyvols)
+   print('VolumeCheck: etcd', etcdip, 'not readable (volumes/replivol), pass skipped')
+   sys.exit(0)
   volumecheck(etcds, replis)

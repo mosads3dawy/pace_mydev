@@ -81,6 +81,56 @@ def poolishere(pool):
  return os.path.exists('/proc/spl/kstat/zfs/'+pool)
 
 
+OWNERDOWNSECS = 60
+
+def ownergone(pool, owner):
+ # pools/<pool> names another host that is NOT ready.  In a normal take over hostlost() (heartbeat.py) deletes the lost
+ # host's pools/ keys first, so this is the unusual case: e.g. a node that boots as primary because it cannot find the
+ # cluster ip deletes ready/ (docker_setup.sh) while the named owner may still be alive and hold the pool (QC test 22,
+ # validator 643c R1: hostid 0 and multihost off, so nothing in ZFS stops a second import).  Import only when the owner
+ # has not answered a ping for OWNERDOWNSECS in a row; any answer resets the wait.  Owner ip from ActivePartners/<owner>.
+ import re
+ mark = '/root/zpooltoimport-ownerdown.'+pool
+ ownerip = str(get(leaderip, 'ActivePartners/'+owner, strict=True)[0])
+ if ownerip == 'not reachable':
+  print('leader etcd not readable, no import of', pool, 'in this round')
+  return False
+ if not re.match(r'^([0-9]{1,3}\.){3}[0-9]{1,3}$', ownerip):
+  print('pool', pool, 'named for', owner, 'with no known address: imported as before')
+  return True
+ answered = False
+ for _ in range(3):
+  try:
+   if subprocess.run(['ping','-c','1','-W','1',ownerip],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode == 0:
+    answered = True
+    break
+  except subprocess.TimeoutExpired:
+   pass
+ now = stamp()
+ if answered:
+  try:
+   os.remove(mark)
+  except OSError:
+   pass
+  msg = 'pool '+pool+' is named for '+owner+' ('+ownerip+'), not ready but it answers ping: not imported'
+  print(msg)
+  with open('/root/zpooltoimport-guard.log','a') as f:
+   f.write(str(now)+' '+msg+'\n')
+  return False
+ try:
+  with open(mark) as f:
+   since = float(f.read().strip())
+ except (OSError, ValueError):
+  since = now
+  with open(mark,'w') as f:
+   f.write(str(now))
+ if now - since < OWNERDOWNSECS:
+  print('pool', pool, 'owner', owner, ownerip, 'silent for', int(now-since), 's: waiting', OWNERDOWNSECS, 's before the import')
+  return False
+ with open('/root/zpooltoimport-guard.log','a') as f:
+  f.write(str(now)+' pool '+pool+' owner '+owner+' '+ownerip+' silent for '+str(int(now-since))+' s: import allowed\n')
+ return True     # the mark is removed after a successful import (a failed try keeps the wait done)
+
 def memberimportdir(pool, disks):
  # a directory of symlinks to the by-id devices (and their partitions) of the disks etcd lists in <pool>; '' when none is present
  import glob
@@ -178,6 +228,8 @@ def zpooltoimport(*args):
    if owner not in ('_1', '', myhost) and owner in readyhosts:
     print('pool', pool, 'is held by', owner, '(ready): not imported')
     continue
+   if owner not in ('_1', '', myhost) and not ownergone(pool, owner):
+    continue
    print('pool to be imported now', pool)
    poolid = get(leaderip,'ActPool/'+pool)[0]
    if poolid == '_1':
@@ -200,6 +252,10 @@ def zpooltoimport(*args):
    print('result',result)
    if pool in result and poolonline(pool):
     dels(leaderip, 'poolnxt', pool )      # imported: the assignment is done
+    try:
+     os.remove('/root/zpooltoimport-ownerdown.'+pool)
+    except OSError:
+     pass
     # The pool is imported by its id (ActPool/<pool>), and a new id is given right after the import, so the next import
     # (by the id every node knows) finds only the devices that took part in THIS import: a disk that was away meanwhile
     # keeps the old id and can no longer be imported as the pool.  ZFS refuses 'zpool reguid' on a pool that is not healthy,
