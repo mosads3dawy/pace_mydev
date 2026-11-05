@@ -49,8 +49,13 @@ def selectimport(*args):
      myhostip = args[4]
      etcdip = args[5]
      return
-    knowns=get(etcdip, 'ready','--prefix')
-    allpools=get(etcdip, 'pools/','--prefix')
+    knowns=get(etcdip, 'ready','--prefix', strict=True)
+    # ownership from the LEADER's etcd: a follower's local pools/ can be stale (it named the follower after a wrong import
+    # while the leader named itself), then both nodes took themselves for the owner and re-pointed poolnxt at each other
+    # every round (QC test 21 step 30.5, QSD5.315).  A failed read skips the round.
+    allpools=get(leaderip, 'pools/','--prefix', strict=True)
+    if 'not reachable' in str(knowns) or 'not reachable' in str(allpools):
+        return
     knowns = [x[0].split('/')[1] for x in knowns ]
     for poolpair in allpools:
         if myhost not in poolpair[1]:

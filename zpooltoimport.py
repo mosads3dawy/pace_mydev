@@ -115,14 +115,18 @@ def zpooltoimport(*args):
      initgetpoolstoimport(leader,leaderip,myhost,myhostip)
      return
  poouids = get(etcdip,'poouids',myhost) 
- nextpools=get(leaderip, 'poolnxt', '--prefix') 
+ # Fail closed: every leader read that decides an import is strict (['not reachable'] on a failed etcdctl) and a failed one
+ # skips the whole round.  A failed read used to look like "no pool is held" and the follower imported the pool the leader
+ # held (split brain, QC test 21 step 30.5, QSD5.315).
+ nextpools=get(leaderip, 'poolnxt', '--prefix', strict=True) 
  if 'not reachable' in str(nextpools):
         return
  needtoimport=[ x for x in nextpools if myhost in str(x)] 
- pools = [v for k,v in getall(leaderip)['pools'].items()]
- mypools = [v  for v in pools if v['host'] == myhost ]
- if 'not reachable' in str(pools):
+ alldsks = get(leaderip, 'host', 'current', strict=True)
+ if 'not reachable' in str(alldsks):
         return
+ pools = [v for k,v in getall(leaderip, alldsks)['pools'].items()]
+ mypools = [v  for v in pools if v['host'] == myhost ]
  if '_1' in str(poouids):
     poouids = []
  for poo in poouids:
@@ -162,6 +166,17 @@ def zpooltoimport(*args):
     print('pool of another cluster, not imported', pool)
     dels(leaderip, 'poolnxt', pool)
     dels(leaderip, 'pools', pool)
+    continue
+   # poolnxt/<pool> is only the STANDBY assignment: it names this node while the owner is alive too.  Import only when
+   # the leader's pools/<pool> is absent, names this node, or names a host that is not ready (hostlost() removes both).
+   owner = str(get(leaderip, 'pools/'+pool, strict=True)[0])
+   readies = get(leaderip, 'ready', '--prefix', strict=True)
+   if owner == 'not reachable' or 'not reachable' in str(readies) or len(readies) == 0:
+    print('leader etcd not readable, no import in this round')
+    return
+   readyhosts = [ x[0].split('/')[1] for x in readies if len(x[0].split('/')) > 1 ]
+   if owner not in ('_1', '', myhost) and owner in readyhosts:
+    print('pool', pool, 'is held by', owner, '(ready): not imported')
     continue
    print('pool to be imported now', pool)
    poolid = get(leaderip,'ActPool/'+pool)[0]
@@ -229,7 +244,10 @@ def zpooltoimport(*args):
     #cmdline= 'systemctl restart zfs-zed  '
     #result = subprocess.run(cmdline.split(),stdout=subprocess.PIPE).stdout.decode('utf-8')
    else:
-    dels(leaderip, 'pools/',pool)         # not imported (yet): poolnxt stays, the next round (9 s) tries again
+    # not imported (yet): poolnxt stays, the next round (9 s) tries again.  Drop only OUR claim (put above): the old
+    # dels(leaderip,'pools/',pool) removed every pools/ key matching the name, also the real owner's.
+    if str(get(leaderip, 'pools/'+pool, strict=True)[0]) == myhost:
+     dels(leaderip, 'pools/'+pool, str(('pools/'+pool, myhost)))   # exact (key, value) pair of etcddel's filter
         
     
  if myhost != leader:
