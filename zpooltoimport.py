@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import subprocess, sys
+import subprocess, sys, re
 import os
 from logqueue import queuethis, initqueue
 from etcdput import etcdput as put
@@ -174,6 +174,41 @@ def seenbyscan(impdir, poolid):
  pat = r'^\s*(id|pool):\s*'+re.escape(str(poolid))+r'\s*$'
  return re.search(pat, out, re.M) is not None
 
+BYID = '/dev/disk/by-id'
+
+def scanimportable(out, pool, poolid):
+ # pure parser of 'zpool import -d <dir>' output: True when exactly ONE listed pool has this NAME and this exact numeric ID and a
+ # state 'zpool import' accepts without -f (ONLINE / DEGRADED).  Other pools in the scan are ignored (a disk of this node may
+ # still carry the labels of another, deleted pool: QC test 22 643e, node1 sdc/sde = pdhcp288205696 id 9940180792541655089).
+ if not re.match(r'^[0-9]+$', str(poolid)):
+  return False                     # expected id unknown: never import by a scan
+ blocks, cur = [], None
+ for line in out.splitlines():
+  m = re.match(r'^\s*pool:\s*(\S+)\s*$', line)
+  if m:
+   cur = {'pool': m.group(1)}
+   blocks.append(cur)
+   continue
+  if cur is None:
+   continue
+  m = re.match(r'^\s*(id|state):\s*(\S+)\s*$', line)
+  if m and m.group(1) not in cur:
+   cur[m.group(1)] = m.group(2)
+ hits = [b for b in blocks if b.get('pool') == pool and b.get('id') == str(poolid)]
+ return len(hits) == 1 and hits[0].get('state') in ('ONLINE', 'DEGRADED')
+
+def localscan(pool, poolid):
+ # cold start / sole survivor: no pool is imported anywhere, so hosts/*/current shows every disk as free ('pree') and
+ # memberimportdir() finds nothing.  The pool may still be importable from this node's own disks: a read-only scan of
+ # /dev/disk/by-id (60 s timeout), matched by the exact expected id AND name (scanimportable()).
+ if not re.match(r'^[0-9]+$', str(poolid)):
+  return False
+ try:
+  res = subprocess.run(['/usr/sbin/zpool','import','-d',BYID],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
+ except (OSError, subprocess.TimeoutExpired):
+  return False
+ return scanimportable(res.stdout.decode('utf-8','replace'), pool, poolid)
+
 def nomemberhere(pool, poolline, owner):
  # poolnxt/<pool> names me but no disk that etcd lists for <pool> is present here and no ready host lists the pool (checked
  # by the caller): no import.  Right after a take over the own iSCSI disks may still be missing, so the keys are kept for
@@ -290,14 +325,24 @@ def zpooltoimport(*args):
    # cluster to import, and a leftover disk or a deleted pool of the same id could be imported (QC test 22 validator 643d B,
    # P-DEVELOPMENT note 116).  The stale poolnxt/pools keys are removed by the leader after STALESECS (nomemberhere()).
    impdir = memberimportdir(pool, getall(leaderip)['disks'])
+   byscan = False
    if not impdir:
-    nomemberhere(pool, poolline, owner)
-    continue
+    # No disk is listed as a member (cold start / sole survivor: nothing is imported anywhere, every disk is 'pree').  The checks
+    # above already made sure that no host lists the pool in hosts/*/current and that pools/<pool> is absent, mine, or names a
+    # host that is not ready and silent for OWNERDOWNSECS.  Import only if a scan of this node's own disks lists exactly this
+    # pool id AND name as importable (P-DEVELOPMENT note 117); never with an unknown id, never another pool of the scan.  While
+    # it does, the stale-key removal (nomemberhere) is not run, so poolnxt is no longer deleted and re-created in a loop.
+    if not localscan(pool, poolid):
+     nomemberhere(pool, poolline, owner)
+     continue
+    impdir = BYID
+    byscan = True
+    guardlog('pool '+pool+': no member disk listed, '+BYID+' shows id '+str(poolid)+' importable here: importing')
    try:
     os.remove('/root/zpooltoimport-nomember.'+pool)
    except OSError:
     pass
-   if not seenbyscan(impdir, poolid):
+   if not byscan and not seenbyscan(impdir, poolid):
     print('pool', pool, 'id', poolid, 'is not seen by zpool import -d', impdir, ': not imported in this round')
     continue
    cmdline= '/usr/sbin/zpool import -d '+impdir+' '+poolid
