@@ -82,6 +82,34 @@ def poolishere(pool):
 
 
 OWNERDOWNSECS = 60
+MARKSTALESECS = 30   # a silent mark whose last check is older than this restarts the wait (validator 643e F5)
+
+def silentsince(mark, now):
+ # Start of the silent period of an ownerdown/peerdown mark.  The mark holds "<since> <last silent check>".  The marks live in
+ # /root and survive reboots, and a round that stops reaching this check leaves its mark behind; such a stale mark made a live
+ # holder that missed its pings once look "silent >= 60 s" at once (validator 643e F5).  So the wait counts only while the
+ # silent checks follow each other within MARKSTALESECS (rounds are ~9-20 s); an older, future-dated or old-format (one value)
+ # mark restarts it at now.
+ since, had = None, False
+ try:
+  with open(mark) as f:
+   v = f.read().split()
+  had = True
+  s, last = float(v[0]), float(v[1])
+  if s <= last and 0 <= now - last <= MARKSTALESECS:
+   since = s
+ except (OSError, ValueError, IndexError):
+  pass
+ if since is None:
+  if had:
+   guardlog(mark+': last silent check missing or not within '+str(MARKSTALESECS)+' s, the '+str(OWNERDOWNSECS)+' s wait restarts')
+  since = now
+ try:
+  with open(mark,'w') as f:
+   f.write(str(since)+' '+str(now))
+ except OSError:
+  pass
+ return since
 
 def ownergone(pool, owner):
  # pools/<pool> names another host that is NOT ready.  In a normal take over hostlost() (heartbeat.py) deletes the lost
@@ -117,13 +145,7 @@ def ownergone(pool, owner):
   with open('/root/zpooltoimport-guard.log','a') as f:
    f.write(str(now)+' '+msg+'\n')
   return False
- try:
-  with open(mark) as f:
-   since = float(f.read().strip())
- except (OSError, ValueError):
-  since = now
-  with open(mark,'w') as f:
-   f.write(str(now))
+ since = silentsince(mark, now)
  if now - since < OWNERDOWNSECS:
   print('pool', pool, 'owner', owner, ownerip, 'silent for', int(now-since), 's: waiting', OWNERDOWNSECS, 's before the import')
   return False
@@ -238,16 +260,7 @@ def peersilent(pool, host, ip):
   except OSError:
    pass
   return False
- try:
-  with open(mark) as f:
-   since = float(f.read().strip())
- except (OSError, ValueError):
-  since = now
-  try:
-   with open(mark,'w') as f:
-    f.write(str(now))
-  except OSError:
-   pass
+ since = silentsince(mark, now)
  return now - since >= OWNERDOWNSECS
 
 def peersclear(pool, alldsks, readyhosts):
