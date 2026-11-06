@@ -185,7 +185,44 @@ def guardlog(msg):
  except OSError:
   pass
 
-def seenbyscan(impdir, poolid):
+def scanotherids(out, pool, poolid):
+ # pure parser of 'zpool import -d <dir>' output: the ids that the scan lists for this pool NAME and that differ from the expected id
+ ids, cur = [], None
+ for line in out.splitlines():
+  m = re.match(r'^\s*pool:\s*(\S+)\s*$', line)
+  if m:
+   cur = m.group(1)
+   continue
+  m = re.match(r'^\s*id:\s*(\S+)\s*$', line)
+  if m:
+   if cur == pool and m.group(1) != str(poolid) and m.group(1) not in ids:
+    ids.append(m.group(1))
+   cur = None
+ return ids
+
+def idmismatch(out, pool, poolid):
+ # The disk label and ActPool/<pool> disagree. Reguid is the deliberate protection against a stale leg, so a pool with another id
+ # is never imported by name; this must not look like "no member disk here" (validator 643f B3).
+ others = scanotherids(out, pool, poolid)
+ if others:
+  guardlog('pool '+pool+': id '+','.join(others)+' on disk, ActPool '+str(poolid)+': NOT imported, operator decision')
+ return len(others) > 0
+
+def clearnomember(pool):
+ try:
+  os.remove('/root/zpooltoimport-nomember.'+pool)
+ except OSError:
+  pass
+
+def ownportalsession(ip):
+ # a session to this node's own iSCSI portal: without it the own disks are not visible yet, so an empty scan proves nothing
+ try:
+  res = subprocess.run(['/sbin/iscsiadm','-m','session'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+ except (OSError, subprocess.TimeoutExpired):
+  return False
+ return re.search(r'(^|\s)'+re.escape(str(ip))+r':3266,', res.stdout.decode('utf-8','replace'), re.M) is not None
+
+def seenbyscan(impdir, poolid, pool=None):
  # the pool (by its id, or by its name when no ActPool id is known) is listed by a scan of the member disks only
  import re
  try:
@@ -194,7 +231,11 @@ def seenbyscan(impdir, poolid):
   return False
  out = res.stdout.decode('utf-8','replace')
  pat = r'^\s*(id|pool):\s*'+re.escape(str(poolid))+r'\s*$'
- return re.search(pat, out, re.M) is not None
+ if re.search(pat, out, re.M) is not None:
+  return True
+ if pool:
+  idmismatch(out, pool, poolid)
+ return False
 
 BYID = '/dev/disk/by-id'
 
@@ -328,13 +369,26 @@ def localscan(pool, poolid):
   res = subprocess.run(['/usr/sbin/zpool','import','-d',BYID],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
  except (OSError, subprocess.TimeoutExpired):
   return False
- return scanimportable(res.stdout.decode('utf-8','replace'), pool, poolid)
+ out = res.stdout.decode('utf-8','replace')
+ if scanimportable(out, pool, poolid):
+  return True
+ if idmismatch(out, pool, poolid):
+  # the second nomemberhere() skip: the member disk IS here, with another id. None = nomemberhere is not run; its wait starts anew
+  clearnomember(pool)
+  return None
+ return False
 
 def nomemberhere(pool, poolline, owner):
  # poolnxt/<pool> names me but no disk that etcd lists for <pool> is present here and no ready host lists the pool (checked
  # by the caller): no import.  Right after a take over the own iSCSI disks may still be missing, so the keys are kept for
  # STALESECS; after that the LEADER deletes poolnxt/<pool> and (if it names me) pools/<pool>, by exact key and value.
  # ActPool/<pool> is kept: the only copy of the pool may sit on a node that is off now (note 116).
+ # Skipped and its wait restarted (validator 643f): no session to this node's own portal (here), and a scan that shows this name with
+ # another id (localscan() returns None, this function is not called).
+ if not ownportalsession(myhostip):
+  guardlog('pool '+pool+': no member disk here and no iSCSI session to my own portal '+str(myhostip)+': not imported, no key removed')
+  clearnomember(pool)
+  return
  mark = '/root/zpooltoimport-nomember.'+pool
  now = stamp()
  try:
@@ -470,7 +524,7 @@ def zpooltoimport(*args):
     os.remove('/root/zpooltoimport-nomember.'+pool)
    except OSError:
     pass
-   if not byscan and not seenbyscan(impdir, poolid):
+   if not byscan and not seenbyscan(impdir, poolid, pool):
     print('pool', pool, 'id', poolid, 'is not seen by zpool import -d', impdir, ': not imported in this round')
     continue
    cmdline= '/usr/sbin/zpool import -d '+impdir+' '+poolid

@@ -35,6 +35,48 @@ noinit = [ 'getconfig', 'replipart' , 'evacuatehost','hostdown','namespace' , 'i
 ##### synced template for initial sync for known nodes : sync/Operation/initial/node Operation_stamp #######################
 ##### delete request of same sync if ActivePartners qty reached #######################
 
+def syncverifylog(msg):
+ print(msg)
+ try:
+  if os.path.getsize('/root/syncverify.log') > 262144:
+   os.remove('/root/syncverify.log')
+ except OSError:
+  pass
+ try:
+  with open('/root/syncverify.log','a') as f:
+   f.write(str(timestamp())+' '+msg+'\n')
+ except OSError:
+  pass
+
+def putverified(etcdip, key, val):
+ # etcdput swallows every error and always returns 1, and a sync ack is proof to the whole cluster that the value is here (isinsync
+ # counts acks, it never compares values). True only when a strict read shows exactly key=val. Used by the etcdonly Add branch of
+ # syncrequest and by copyactpool; etcdput itself and its many other callers do not change (QC test 22, validator 643f, note 119).
+ put(etcdip, key, val)
+ got = get(etcdip, key, '--prefix', strict=True)
+ if (key, val) in got:
+  return True
+ syncverifylog('read back after put '+key+'='+val+' on '+etcdip+' does not match')
+ return False
+
+def copyactpool(leader, leaderip, myhost, myhostip):
+ # The member's ActPool/<pool> becomes the truth when it takes over, and the sync request that delivers it is a one-shot: a lost
+ # update stayed lost and the pool was refused on take over (validator 643f). So: leader -> member, every pass, on a member only,
+ # after strict reads of both sides, and a put only for a value that differs. An absent or empty leader value never touches
+ # the member: deleting a pool stays the job of the sync request. Limit: a stale leader overwrites a member's newer id (note 119).
+ if myhost == leader or leaderip == myhostip:
+  return
+ fromleader = get(leaderip, 'ActPool', '--prefix', strict=True)
+ here = get(myhostip, 'ActPool', '--prefix', strict=True)
+ if 'not reachable' in fromleader or 'not reachable' in here or '_1' in fromleader or '_1' in here:
+  print('ActPool copy skipped: a strict read failed', leaderip, myhostip)
+  return
+ here = dict(here)
+ for key, val in fromleader:
+  if key.startswith('ActPool/') and val not in ('', '_1') and here.get(key) != val:
+   ok = putverified(myhostip, key, val)
+   syncverifylog('ActPool copy from the leader: '+key+' was '+str(here.get(key))+' now '+val+(' ok' if ok else ' FAILED'))
+
 def signal_reboot_via_etcd(etcd_endpoint, myhost, reason):
     """
     Write the etcd key that the running rebootmepls.sh watcher is polling
@@ -472,11 +514,14 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
         synckeys(leaderip,myhostip, sync,sync)
    if sync in etcdonly and myhost != leader:
      if opers[0] == 'Add':
+      # no read back -> flag 0: no ack, the request stays, isinsync stays no and the next pass applies it again
       if 'Split' in opers[1]:
-       put(myhostip,sync,opers[2].replace(':::','_').replace('::','/'))
+       if not putverified(myhostip,sync,opers[2].replace(':::','_').replace('::','/')):
+        flag = 0
       else:
        print('oper', opers, sync)
-       put(myhostip,sync+'/'+opers[1].replace(':::','_').replace('::','/'),opers[2].replace(':::','_').replace('::','/'))
+       if not putverified(myhostip,sync+'/'+opers[1].replace(':::','_').replace('::','/'),opers[2].replace(':::','_').replace('::','/')):
+        flag = 0
      else:
       print(sync,opers)
       if 'ready' not in sync:
@@ -613,6 +658,8 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
     put(myhostip, syncleft+'/'+myhost, stamp)
      
  if myhost != leader:
+  if 'pullsync' not in pullsync:
+   copyactpool(leader, leaderip, myhost, myhostip)
   dones = get(leaderip,'sync','/request/dhcp')
   otherdones = [ x for x in dones if '/request/dhcp' in str(x) ] 
   localdones = get(myhostip, 'sync', '--prefix')
@@ -694,6 +741,7 @@ def restetcd(leader,leaderip, myhost,myhostip):
     # a follower that was down/hung when the leader named the next leader never gets the one-shot sync/nextlead/Add_er request
     # (pruned meanwhile; syncall runs only for never-initialised nodes), so take the leader's value on every start
     synckeys(leaderip, myhostip, 'nextlead', 'nextlead')
+    copyactpool(leader, leaderip, myhost, myhostip)
  
 runcmd={'Snapperiod':'etctocron'} 
 synctypes={'syncinit':syncinit, 'syncrequest':syncrequest, 'syncall':syncall , 'restetcd': restetcd}
