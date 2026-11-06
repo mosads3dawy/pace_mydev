@@ -82,13 +82,13 @@ def poolishere(pool):
 
 
 OWNERDOWNSECS = 60
-MARKSTALESECS = 30   # a silent mark whose last check is older than this restarts the wait (validator 643e F5)
+MARKSTALESECS = 180  # a silent mark whose last check is older than this restarts the wait (validator 643e F5; 30 was too short, note 119 follow-up)
 
 def silentsince(mark, now):
  # Start of the silent period of an ownerdown/peerdown mark.  The mark holds "<since> <last silent check>".  The marks live in
  # /root and survive reboots, and a round that stops reaching this check leaves its mark behind; such a stale mark made a live
  # holder that missed its pings once look "silent >= 60 s" at once (validator 643e F5).  So the wait counts only while the
- # silent checks follow each other within MARKSTALESECS (rounds are ~9-20 s); an older, future-dated or old-format (one value)
+ # silent checks follow each other within MARKSTALESECS (rounds are ~9-35 s, a scan timeout adds 60 s); an older, future-dated or old-format (one value)
  # mark restarts it at now.
  since, had = None, False
  try:
