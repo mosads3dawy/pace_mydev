@@ -5,6 +5,8 @@
 # disks over.  For a loop device the identity is its backing file; otherwise the device name.
 diskserial() {
 	ident=`losetup -n -O BACK-FILE /dev/$1 2>/dev/null | tr -d ' '`
+	# a real disk: its own serial (the device name sdb is the same on every node and gave every node's sdb one id)
+	[ -z "$ident" ] && ident=`lsblk -dno serial /dev/$1 2>/dev/null | tr -d ' '`
 	[ -z "$ident" ] && ident=$1
 	echo -n "$ident" | md5sum | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\).*/\1-\2-\3-\4-\5/'
 }
@@ -30,8 +32,18 @@ setproduct() {
 ##########################
 stamp=`date +%s`
 echo $@ > /root/addtargets
-bootpart=`lsblk -o NAME,MOUNTPOINT | grep boot | awk '{print $1}'`
-bootdisk='sd' 
+# the boot disk = the parent of the /boot (else /) partition, as addtargetdisks.sh finds it.  It was hard-coded
+# 'sd' and "grep -v sd" dropped EVERY sd* disk, so on a physical/VM node the disk list was always empty and the ACL
+# loop below never ran: a node that joined after this node booted never got an ACL on this node's target (test 26
+# step 7b, id 717).  Not found = 'sd' as before.
+bootpart=`lsblk -lno NAME,MOUNTPOINT | awk '$2=="/boot"{print $1; exit}'`
+[ -z "$bootpart" ] && bootpart=`lsblk -lno NAME,MOUNTPOINT | awk '$2=="/"{print $1; exit}'`
+bootdisk=''
+[ -n "$bootpart" ] && bootdisk=`lsblk -no PKNAME /dev/$bootpart 2>/dev/null | head -1 | tr -d ' '`
+[ -z "$bootdisk" ] && bootdisk='sd'
+# container flavour: the disks are the host's loop devices (lsblk -S would drop them); keep the old filter there
+[ -f /TopStor/flavor.sh ] && . /TopStor/flavor.sh
+is_container 2>/dev/null && bootdisk='sd'
 echo bootdisk is $bootdisk
 cd /pace
 etcdip=`echo $@ | awk '{print $1}'`
@@ -49,8 +61,11 @@ declare -a iscsitargets=(`docker exec etcdclient /pace/iscsiclients.py $etcdip |
 #currentdisks=$(echo "$initialt" | awk '/o- iscsi/{flag=1} flag; /o- loopback/{flag=0}')
 currentdisks=$(echo "$initialt" | awk '/iscsi/{flag=1} flag; /loopback/{flag=0}')
 #currentdisks=`targetcli ls /iscsi`
+# whole disks only (-S: no partitions, loops or other non-SCSI devices) and the boot disk by its exact name;
+# with the 'sd' fallback the old listing and filter stay as they were
 lsblk=$(lsblk -n -o name,serial,vendor)
-disks=(`echo "$lsblk" | grep -v $bootdisk | grep -v sr0 |  grep -v LIO | awk '{print $1}'`)
+[ "$bootdisk" != 'sd' ] && lsblk=$(lsblk -nS -o name,serial,vendor)
+disks=(`echo "$lsblk" | grep -vw $bootdisk | grep -v sr0 |  grep -v LIO | awk '{print $1}'`)
 # container flavour: /root/loopdisks lists the only disks this node may export (the nodes of several clusters share
 # the host's loop devices).  No file = every disk, as before.
 [ -f /TopStor/flavor.sh ] && . /TopStor/flavor.sh
@@ -63,7 +78,7 @@ if [ -s /root/loopdisks ] && is_container 2>/dev/null; then
 	disks=("${keep[@]}")
 fi
 nodes=(`docker exec etcdclient /TopStor/etcdgetlocal.py Active --prefix | awk -F'Partners/' '{print $2}' | awk -F"'" '{print $1}'`)
-diskids=`echo "$lsblk" | grep -v $bootdisk | grep -v sr0 | grep -v LIO | awk '{print $1" "$2}'`
+diskids=`echo "$lsblk" | grep -vw $bootdisk | grep -v sr0 | grep -v LIO | awk '{print $1" "$2}'`
 mappedhosts=`echo "$currentdisks" | grep Mapped`;
 blocks=$(echo "$initialt" | awk '/^  \| o- block /{flag=1} flag; /^  \| o- fileio /{flag=0}')
 targets=`echo "$blocks" | grep -v deactivated |  grep dev | awk -F'[' '{print $2}' | awk '{print $1}'`
@@ -76,7 +91,7 @@ for ddisk in  "${disks[@]}"; do
 	ordinary=${ddisk}$myhost
 	#scsidisk=`ls -l /dev/disk/by-id/ | grep -w $ddisk | grep -v part | grep scsi | grep -v LIO | grep -v SLS | awk '{print $9}'`
 	scsidisk='scsi-'$ordinary
-	ln -s /dev/$ddisk /dev/disk/by-id/$scsidisk 2> /dev/null
+	is_container 2>/dev/null && ln -s /dev/$ddisk /dev/disk/by-id/$scsidisk 2> /dev/null
 	echo scsidisk=$scsidisk, ordinary=$ordinary
 	echo targetcli backstores/block create ${ddisk}-${myhost} /dev/$ddisk
 	targetcli backstores/block create name=${ddisk}-${myhost} dev=/dev/$ddisk wwn=`diskserial $ddisk`
@@ -170,11 +185,11 @@ tpgs1=`echo "$currentdisks" | grep iqn | grep TPG | grep :t1`
 # only MY target: with several clusters in one kernel (containers) the LIO config also holds other nodes' targets
 tpgs=`echo "$currentdisks" | grep iqn | grep TPG | grep "com.${myhost}:t1" | awk -F'iqn' '{print $2}' | awk '{print $1}'`
 # mapping the luns to every iqn in the tpgs create the missing ones and create also the 
+# every Active node gets an ACL on my target even when there is no disk to map (it was inside the disk loop, so an
+# empty disk list left a newly joined node without an ACL and its login failed with rc 24)
 for node in "${nodes[@]}"; do
- for ddisk in "${disks[@]}"; do
 	for iqn in "${tpgs[@]}"; do
-
- 		echo "$currentdisks" |  awk -v iqn="iqn$iqn" '$0 ~ iqn {flag=1} flag; /o- portals/{flag=0}'  | grep redhat:$node >/dev/null
+ 		echo "$currentdisks" |  awk -v iqn="iqn$iqn" '$0 ~ iqn {flag=1} flag; /o- portals/{flag=0}'  | grep -w "redhat:$node" >/dev/null
 		if [ $? -ne 0 ];
 		then
   			targetcli iscsi/iqn${iqn}/tpg1/acls/ create iqn.1994-05.com.redhat:$node
@@ -182,7 +197,11 @@ for node in "${nodes[@]}"; do
 		else
 		 	echo the node $node already has an acl entry the tpgs 
 		fi
-		
+	done
+done
+for node in "${nodes[@]}"; do
+ for ddisk in "${disks[@]}"; do
+	for iqn in "${tpgs[@]}"; do
  		devdisk=`echo $ddisk | awk '{print $1}'`
  		echo "$currentdisks" |  awk -v iqn="iqn$iqn" '$0 ~ iqn {flag=1} flag; /o- portals/{flag=0}' | awk -v iqn="o- luns" '$0 ~ iqn {flag=1} flag; /o- portals/{flag=0}' | grep  ${devdisk}-${myhost}  >/dev/null
 		if [ $? -eq 0 ];
