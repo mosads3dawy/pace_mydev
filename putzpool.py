@@ -105,7 +105,10 @@ def putzpool():
     for lss in lsscsi:
      if any('/dev/'+b[0] in lss for drive in drives):
       b[0]='scsi-'+lss.split()[6]
-   
+   if b[0].startswith('wwn-0x'):   # by-id import names a leg wwn-0x<id>: same disk as scsi-3<id> (lsscsi col 6); parse it as that name
+    b[0]='scsi-3'+b[0][6:]
+    a=a.replace(zname,b[0],1)
+
   if "pdhc" in str(b) and  'pool' not in str(b):
    raidlist=[]
    volumelist=[]
