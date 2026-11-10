@@ -8,7 +8,7 @@ from etcdputnoport import etcdput as putnoport
 from etcdput import etcdput as put 
 from Evacuatelocal import setall
 from etcddel import etcddel as dels
-from usersyncall import usersyncall, usrfninit, oneusersync, pulladminhash
+from usersyncall import usersyncall, usrfninit, oneusersync, pulladminhash, followhashes
 from groupsyncall import groupsyncall, grpfninit, onegroupsync
 from socket import gethostname as hostname
 from etcdsync import synckeys
@@ -660,6 +660,8 @@ def syncrequest(leader,leaderip,myhost, myhostip,pullsync='pullavail'):
  if myhost != leader:
   if 'pullsync' not in pullsync:
    copyactpool(leader, leaderip, myhost, myhostip)
+   # a password hash that differs from the leader's follows the leader (admin and every user here), at most once a minute
+   followhashes(leaderip, myhostip)
   dones = get(leaderip,'sync','/request/dhcp')
   otherdones = [ x for x in dones if '/request/dhcp' in str(x) ] 
   localdones = get(myhostip, 'sync', '--prefix')

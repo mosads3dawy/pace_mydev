@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import subprocess,sys
+import subprocess,sys,os
 from etcdgetpy import etcdget as get
 from etcdgetnoportpy import etcdget as getnoport
 from etcdput import etcdput as put
@@ -7,7 +7,7 @@ from etcddel import etcddel as dels
 from ast import literal_eval as mtuple
 from time import time as _timestamp
 
-leader, leaderip, myhost, myhostip = '','','',''
+leader, leaderip, myhost, myhostip, pport = '','','','','-1'
 def usrfninit(ldr,ldrip,hst,hstip,pprt='-1'):
  global allusers, leader ,leaderip, myhost, myhostip, pport
  leader, leaderip, myhost, myhostip, pport = ldr, ldrip, hst, hstip, pprt
@@ -84,15 +84,42 @@ def thread_add(user,syncip, tosync='pullavail'):
  print('***************************')
  result=subprocess.run(cmdline,stdout=subprocess.PIPE)
 
+def delexactkey(etcdip, key):
+ """'etcdctl del <key>' without --prefix: removes exactly this one key.  etcddel.py (dels) matches by SUBSTRING of key or value
+ (dels(ip,'user','usr1') also removed usersinfo/usr10.., usershash/usr10.. and usersigroup/Everyone), so never use it for a user."""
+ try:
+  subprocess.run(['etcdctl','--endpoints=http://'+etcdip+':2379','del',key],stdout=subprocess.PIPE,timeout=10,env=dict(os.environ,ETCDCTL_API='3'))
+ except Exception as e:
+  print('delexactkey',key,e)
+
 def thread_del(username,syncip, pullsync='pullavail'):
- global allusers, leader ,leaderip, myhost, myhostip
- global allusers
- if  'NoUser' == username:
+ global allusers, leader ,leaderip, myhost, myhostip, pport
+ if  'NoUser' == username or 'Everyone' == username or 'admin' == username or '' == username:
   return
- if username not in str(allusers) and 'admin' != username:
-  cmdline=['/TopStor/UnixDelUser',leaderip, username,'system',pullsync]
-  result=subprocess.run(cmdline,stdout=subprocess.PIPE)
-  dels(syncip,'user',username)
+ # the user is deleted here only when the sending leader really has no usersinfo/<user> (exact key); a user that was deleted
+ # and created again before this node applied the delete request is kept.  (`username not in str(allusers)` was always true
+ # for a single request: allusers is only filled by a full sync, and it is a substring test.)
+ # a read that failed looks like a missing key ('_1') for a plain key read, so read the key as a prefix (strict: a failed read is
+ # 'not reachable') and take only the entry with exactly this key; anything that is not a (key,value) pair means "unknown": keep
+ try:
+  if 'pullsync' in pullsync:
+   found = getnoport(leaderip,pport,'usersinfo/'+username,'--prefix')
+  else:
+   found = get(leaderip,'usersinfo/'+username,'--prefix',strict=True)
+  if [ x for x in found if not isinstance(x,tuple) ]:
+   print('thread_del: cannot read usersinfo/'+username+' of the leader, user kept', found)
+   return
+  if [ x for x in found if x[0] == 'usersinfo/'+username and x[1] not in ('_1','-1','','None') ]:
+   print('thread_del: the leader still has usersinfo/'+username+', user kept')
+   return
+ except Exception as e:
+  print('thread_del: cannot read usersinfo/'+username+' of the leader, user kept', e)
+  return
+ cmdline=['/TopStor/UnixDelUser',leaderip, username,'system',pullsync]
+ result=subprocess.run(cmdline,stdout=subprocess.PIPE)
+ # exact keys of this user only (UnixDelUser already removed them; this clears what it could not)
+ delexactkey(syncip,'usersinfo/'+username)
+ delexactkey(syncip,'usershash/'+username)
 
 def usersyncall(tosync='pullavail'):
  global allusers, leader ,leaderip, myhost, myhostip,pport
@@ -132,6 +159,39 @@ def usersyncall(tosync='pullavail'):
    if user not in allusers:
      user=user[0].replace('usersinfo/','')
      thread_del(user, syncip, tosync)
+
+_hashchecked = 0
+def followhashes(ldrip, hstip, every=60):
+ """Follower side, called by every sync pass (checksyncs.syncrequest): a password hash that differs from the leader's is replaced
+ by the leader's (admin, and every user that has a usersinfo record here).  A node that was down while a password changed, or whose
+ pending 'passwd' request was withdrawn, otherwise kept the old hash and handed it to the cluster when it became the leader (QC
+ test 26 step 35).  At most once per `every` seconds; never creates a hash for a user that does not exist here."""
+ global _hashchecked
+ now = _timestamp()
+ if now - _hashchecked < every:
+  return 0
+ _hashchecked = now
+ changed = 0
+ try:
+  theirs = get(ldrip,'usershash','--prefix',strict=True)
+  mine = get(hstip,'usershash','--prefix',strict=True)
+  if [ x for x in theirs + mine if not isinstance(x,tuple) ]:
+   return 0
+  mine = dict(mine)
+  for key, newhash in theirs:
+   username = key.replace('usershash/','',1)
+   newhash = str(newhash).replace('\n','')
+   if not key.startswith('usershash/') or '/' in username or len(newhash) <= 3 or newhash in ('_1','-1','None') or mine.get(key) == newhash:
+    continue
+   if username != 'admin' and not [ x for x in get(hstip,'usersinfo/'+username,'--prefix',strict=True) if x[0] == 'usersinfo/'+username ]:
+    continue
+   print('followhashes: the password hash of', username, 'follows the leader')
+   put(hstip,key,newhash)
+   subprocess.run(['/TopStor/UnixChangePass',username,'admin'],stdout=subprocess.PIPE)
+   changed += 1
+ except Exception as e:
+  print('followhashes', e)
+ return changed
 
 def pulladminhash(username='admin'):
  """Receiver (DR site) side of the replication: the password hash of `username` on the sending cluster replaces the one
