@@ -134,6 +134,30 @@ def syncinit(leader,leaderip, myhost,myhostip):
     put(leaderip,'sync/'+sync+'/'+'initial/request/'+myhost,sync+'_initial_'+str(stamp)) 
  return
 
+# QSD5.355 (QC 625 step 6, verdict-6090): sync/priv/initial copied 'usersinfo/initial' (the word 'initial' taken as a user
+# name), so a node that boots or joins got no privilege change.  Every user record this node already has now takes the
+# privilege fields (5th field on) of the leader's record; uid:gid, pool, name and size stay this node's.  A user this node
+# does not have yet is left to the user sync (sync/user/initial), which creates it.
+def privinitial(leaderip, myhostip):
+ import re
+ try:
+  mine = {}
+  for x in get(myhostip, 'usersinfo', '--prefix'):
+   if isinstance(x, (list, tuple)) and len(x) == 2:
+    mine[str(x[0])] = str(x[1])
+  for x in get(leaderip, 'usersinfo', '--prefix'):
+   if not isinstance(x, (list, tuple)) or len(x) != 2 or not str(x[0]).startswith('usersinfo/') or str(x[0]) not in mine:
+    continue
+   lf, of = str(x[1]).split('/'), mine[str(x[0])].split('/')
+   if len(lf) < 5 or len(of) < 4 or not re.match(r'^[0-9]+:[0-9]+:$', lf[0]) or not re.match(r'^[0-9]+:[0-9]+:$', of[0]):
+    continue
+   new = '/'.join(of[0:4] + lf[4:])
+   if new != mine[str(x[0])]:
+    put(myhostip, str(x[0]), new)
+ except Exception as e:
+  print('privinitial:', e)
+ return
+
 def doinitsync(leader,leaderip,myhost, myhostip, syncinfo,pullsync='pullavail',pport='',myalias=''):
  global syncs, syncanitem, forReceivers, etcdonly, allsyncs, noinit
  syncleft = syncinfo[0]
@@ -159,7 +183,9 @@ def doinitsync(leader,leaderip,myhost, myhostip, syncinfo,pullsync='pullavail',p
      cmdline='/TopStor/HostManualconfig'+sync.upper()+" "+" ".join([leader, leaderip, myhost, myhostip]) 
      print('cmd',cmdline)
      result=subprocess.check_output(cmdline.split(),stderr=subprocess.STDOUT).decode('utf-8')
-    if sync == 'priv':
+    if sync == 'priv' and syncleft.split('/')[2] == 'initial':
+        privinitial(leaderip, myhostip)
+    elif sync == 'priv':
         user=syncleft.split('/')[2]
         synckeys(leaderip, myhostip, 'usersinfo/'+user, 'usersinfo/'+user)
         newinfo = get(myhostip,'usersinfo/'+user)[0]
