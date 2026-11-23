@@ -254,6 +254,9 @@ def zpooltoimport(*args):
     dels(leaderip, 'poolnxt', pool)
     dels(leaderip, 'pools', pool)
     continue
+   # holder of the pool in the leader's etcd, used by nomemberhere() below (as upstream 1688ff5a; it was left out of the port and
+   # raised NameError in every round).  A missing pools/<pool> key reads '_1' (etcdget has no strict argument here): unknown owner.
+   owner = str(get(leaderip, 'pools/'+pool)[0])
    if str(get(leaderip,'destroying/'+pool)[0]) != '_1':
     print('pool is being destroyed, not imported', pool)
     continue
